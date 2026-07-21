@@ -28,9 +28,11 @@ Use this skill when the user asks you to join, observe, move around, emote, or s
 
 - Use OpenClaw's shared `message` tool to speak in Spot; there is no separate `spot_say` tool.
 - Reply to the current Spot conversation using its durable `thread:<threadId>` target.
+- Named-channel replies are delivered in the message's Spot reply thread. Followups stay in that thread; do not create a nested thread.
 - To initiate a DM, target `user:<userId>`; the connector gets or creates the DM thread and posts there.
 - A room returned by `spot_rooms` includes `threadId`; target `thread:<threadId>` to speak in that room.
 - Do not use a world id as if it were a chat thread id.
+- Use the shared `message` tool's `react` and `reactions` actions with the Spot event id. An empty emoji removes only this agent's reactions.
 
 ## Error handling
 

@@ -139,6 +139,102 @@ describe("SpotClient", () => {
     );
   });
 
+  it("supports channel discovery, reply threads, typing, and reactions", async () => {
+    const fetch = vi
+      .fn<typeof globalThis.fetch>()
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify([
+            {
+              id: "channel-1",
+              type: "Channel",
+              name: "general",
+              orgId: "org-1",
+              isPrivate: false,
+              spotId: null,
+              parentEventId: null,
+            },
+          ]),
+          { status: 200 },
+        ),
+      )
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            id: "reply-1",
+            type: "Event",
+            name: null,
+            orgId: "org-1",
+            isPrivate: false,
+            spotId: null,
+            parentEventId: "event-1",
+          }),
+          { status: 201 },
+        ),
+      )
+      .mockResolvedValueOnce(new Response(null, { status: 204 }))
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify([{ id: "reaction-1", userId: "bot", emoji: "👍" }]),
+          { status: 200 },
+        ),
+      )
+      .mockResolvedValueOnce(new Response(JSON.stringify({ id: "event-1" }), { status: 201 }))
+      .mockResolvedValueOnce(new Response(null, { status: 204 }));
+    const client = new SpotClient({ baseUrl: "https://spot.test", token: "x", fetch });
+
+    await expect(client.getOrgThreads("org/1")).resolves.toHaveLength(1);
+    await expect(client.getOrCreateEventThread("event/1")).resolves.toMatchObject({
+      id: "reply-1",
+    });
+    await client.setThreadTyping("reply/1", false);
+    await expect(client.getEventReactions("event/1")).resolves.toEqual([
+      { id: "reaction-1", userId: "bot", emoji: "👍" },
+    ]);
+    await client.addEventReaction("event/1", "👍");
+    await client.removeEventReaction("event/1", "reaction/1");
+
+    expect(fetch.mock.calls.map(([url]) => url)).toEqual([
+      "https://spot.test/api/org/org%2F1/threads",
+      "https://spot.test/api/event/event%2F1/thread",
+      "https://spot.test/api/thread/reply%2F1/typing",
+      "https://spot.test/api/event/event%2F1/reactions",
+      "https://spot.test/api/event/event%2F1/reactions",
+      "https://spot.test/api/event/event%2F1/reactions/reaction%2F1",
+    ]);
+    expect(fetch.mock.calls[2]?.[1]?.body).toBe(JSON.stringify({ isEmpty: false }));
+    expect(fetch.mock.calls[4]?.[1]?.body).toBe(JSON.stringify({ emoji: "👍" }));
+    expect(fetch.mock.calls[5]?.[1]?.method).toBe("DELETE");
+  });
+
+  it("reads source events and threads for durable reply routing", async () => {
+    const fetch = vi
+      .fn<typeof globalThis.fetch>()
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ id: "event-1", threadId: "channel-1" }), {
+          status: 200,
+        }),
+      )
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({ id: "channel-1", type: "Channel" }),
+          { status: 200 },
+        ),
+      );
+    const client = new SpotClient({ baseUrl: "https://spot.test", token: "x", fetch });
+
+    await expect(client.getEvent("event/1")).resolves.toMatchObject({
+      threadId: "channel-1",
+    });
+    await expect(client.getThread("channel/1")).resolves.toMatchObject({
+      type: "Channel",
+    });
+    expect(fetch.mock.calls.map(([url]) => url)).toEqual([
+      "https://spot.test/api/event/event%2F1",
+      "https://spot.test/api/thread/channel%2F1",
+    ]);
+  });
+
   it("converts the REST base URL to the Agent Gateway WebSocket URL", () => {
     expect(
       new SpotClient({ baseUrl: "https://spot.test/a?x=1", token: "x" }).gatewayUrl(),

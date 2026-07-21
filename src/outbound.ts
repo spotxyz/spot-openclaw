@@ -11,6 +11,45 @@ import { resolveSpotAccount } from "./config.js";
 import { SPOT_CHANNEL_ID, type ResolvedSpotAccount } from "./types.js";
 
 export const SPOT_MESSAGE_MAX_LENGTH = 12_000;
+const replyThreadRequests = new Map<string, Promise<string>>();
+
+const getOrCreateReplyThread = async (
+  client: SpotClient,
+  eventId: string,
+): Promise<string> => {
+  const key = `${client.baseUrl}\n${eventId}`;
+  const pending = replyThreadRequests.get(key);
+  if (pending) return pending;
+  const request = client
+    .getOrCreateEventThread(eventId)
+    .then((thread) => {
+      if (!thread.id) {
+        throw new Error(
+          "Spot created the channel reply thread but returned no thread id.",
+        );
+      }
+      return thread.id;
+    })
+    .finally(() => replyThreadRequests.delete(key));
+  replyThreadRequests.set(key, request);
+  return request;
+};
+
+export const resolveSpotReplyDestination = async (
+  client: SpotClient,
+  fallbackThreadId: string,
+  replyToId?: string | null,
+): Promise<string> => {
+  const eventId = replyToId?.trim();
+  if (!eventId) return fallbackThreadId;
+  const event = await client.getEvent(eventId);
+  if (!event.threadId) {
+    throw new Error("Spot returned a reply target without a thread id.");
+  }
+  const sourceThread = await client.getThread(event.threadId);
+  if (sourceThread.type !== "Channel") return event.threadId;
+  return getOrCreateReplyThread(client, eventId);
+};
 
 export const chunkSpotText = (
   text: string,
@@ -113,13 +152,19 @@ export const sendSpotText = async (params: {
   accountId?: string | null;
   to: string;
   text: string;
+  replyToId?: string | null;
 }): Promise<{ messageId: string; threadId: string }> => {
   const account = resolveSpotAccount(params.cfg, params.accountId);
   const client = makeClient(account);
-  const threadId = await resolveSpotThread(
+  const targetThreadId = await resolveSpotThread(
     client,
     account,
     parseSpotTarget(params.to),
+  );
+  const threadId = await resolveSpotReplyDestination(
+    client,
+    targetThreadId,
+    params.replyToId,
   );
   const event = await client.sendThreadMessage(threadId, params.text);
   if (!event.id) {
@@ -147,7 +192,7 @@ export const spotOutboundAdapter: ChannelOutboundAdapter = {
   deliveryCapabilities: {
     durableFinal: {
       text: true,
-      replyTo: false,
+      replyTo: true,
       thread: true,
       messageSendingHooks: true,
     },
@@ -158,6 +203,7 @@ export const spotOutboundAdapter: ChannelOutboundAdapter = {
       ...(ctx.accountId === undefined ? {} : { accountId: ctx.accountId }),
       to: ctx.to,
       text: ctx.text,
+      ...(ctx.replyToId === undefined ? {} : { replyToId: ctx.replyToId }),
     });
     recordChannelActivity({
       channel: SPOT_CHANNEL_ID,

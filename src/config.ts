@@ -114,6 +114,11 @@ export const resolveSpotAccount = (
       `Spot account ${accountId} enables avatar.joinOnStart but has no worldId.`,
     );
   }
+  if (config.monitorOrgChannels && !config.orgId) {
+    throw new Error(
+      `Spot account ${accountId} enables monitorOrgChannels but has no orgId.`,
+    );
+  }
   const {
     token: _token,
     enabled,
@@ -123,6 +128,7 @@ export const resolveSpotAccount = (
     allowBotMessages,
     subscribeWorlds,
     subscribeThreads,
+    monitorOrgChannels,
     ...rest
   } = config;
   return {
@@ -136,6 +142,7 @@ export const resolveSpotAccount = (
     allowBotMessages: allowBotMessages === true,
     subscribeWorlds: subscribeWorlds ?? [],
     subscribeThreads: subscribeThreads ?? [],
+    monitorOrgChannels: monitorOrgChannels === true,
   };
 };
 

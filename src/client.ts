@@ -2,7 +2,9 @@ import type {
   SpotAvatarStartupConfig,
   SpotAvatarState,
   SpotCreatedMessage,
+  SpotEventReaction,
   SpotMeResponse,
+  SpotThreadSummary,
   SpotWorldSpot,
   SpotWorldAvatar,
 } from "./types.js";
@@ -31,6 +33,11 @@ export interface SpotClientOptions {
 export interface SpotRequestOptions {
   signal?: AbortSignal | undefined;
   timeoutMs?: number;
+}
+
+export interface SpotEventSummary {
+  id: string;
+  threadId: string;
 }
 
 export const DEFAULT_SPOT_REQUEST_TIMEOUT_MS = 15_000;
@@ -268,6 +275,105 @@ export class SpotClient {
       "POST",
       `/api/thread/${encodeURIComponent(threadId)}/events`,
       { message },
+      options,
+    );
+  }
+
+  async getOrgThreads(
+    orgId: string,
+    options?: SpotRequestOptions,
+  ): Promise<SpotThreadSummary[]> {
+    return this.request(
+      "GET",
+      `/api/org/${encodeURIComponent(orgId)}/threads`,
+      undefined,
+      options,
+    );
+  }
+
+  async getThread(
+    threadId: string,
+    options?: SpotRequestOptions,
+  ): Promise<SpotThreadSummary> {
+    return this.request(
+      "GET",
+      `/api/thread/${encodeURIComponent(threadId)}`,
+      undefined,
+      options,
+    );
+  }
+
+  async getEvent(
+    eventId: string,
+    options?: SpotRequestOptions,
+  ): Promise<SpotEventSummary> {
+    return this.request(
+      "GET",
+      `/api/event/${encodeURIComponent(eventId)}`,
+      undefined,
+      options,
+    );
+  }
+
+  async getOrCreateEventThread(
+    eventId: string,
+    options?: SpotRequestOptions,
+  ): Promise<SpotThreadSummary> {
+    return this.request(
+      "POST",
+      `/api/event/${encodeURIComponent(eventId)}/thread`,
+      undefined,
+      options,
+    );
+  }
+
+  async setThreadTyping(
+    threadId: string,
+    isEmpty: boolean,
+    options?: SpotRequestOptions,
+  ): Promise<void> {
+    await this.request(
+      "POST",
+      `/api/thread/${encodeURIComponent(threadId)}/typing`,
+      { isEmpty },
+      options,
+    );
+  }
+
+  async getEventReactions(
+    eventId: string,
+    options?: SpotRequestOptions,
+  ): Promise<SpotEventReaction[]> {
+    return this.request(
+      "GET",
+      `/api/event/${encodeURIComponent(eventId)}/reactions`,
+      undefined,
+      options,
+    );
+  }
+
+  async addEventReaction(
+    eventId: string,
+    emoji: string,
+    options?: SpotRequestOptions,
+  ): Promise<unknown> {
+    return this.request(
+      "POST",
+      `/api/event/${encodeURIComponent(eventId)}/reactions`,
+      { emoji },
+      options,
+    );
+  }
+
+  async removeEventReaction(
+    eventId: string,
+    reactionId: string,
+    options?: SpotRequestOptions,
+  ): Promise<void> {
+    await this.request(
+      "DELETE",
+      `/api/event/${encodeURIComponent(eventId)}/reactions/${encodeURIComponent(reactionId)}`,
+      undefined,
       options,
     );
   }

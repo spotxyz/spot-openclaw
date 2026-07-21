@@ -14,9 +14,26 @@ const account: ResolvedSpotAccount = {
   allowBotMessages: false,
   subscribeWorlds: [],
   subscribeThreads: [],
+  monitorOrgChannels: false,
 };
 
 describe("Spot channel status", () => {
+  it("advertises reply threads and shared reactions", () => {
+    expect(spotChannelPlugin.capabilities).toMatchObject({
+      reply: true,
+      threads: true,
+      reactions: true,
+    });
+    expect(
+      spotChannelPlugin.threading?.resolveReplyToMode?.({
+        cfg: {} as OpenClawConfig,
+      }),
+    ).toBe("all");
+    expect(spotChannelPlugin.actions?.supportsAction?.({ action: "react" })).toBe(
+      true,
+    );
+  });
+
   it("projects standard lifecycle and activity fields from the gateway runtime", async () => {
     const buildAccountSnapshot = spotChannelPlugin.status?.buildAccountSnapshot;
     expect(buildAccountSnapshot).toBeDefined();

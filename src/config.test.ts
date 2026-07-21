@@ -50,6 +50,7 @@ describe("Spot account config", () => {
       worldId: "world-1",
       activationMode: "direct-or-mention",
       allowBotMessages: false,
+      monitorOrgChannels: false,
     });
     expect(listSpotAccountIds(cfg)).toEqual(["default"]);
   });
@@ -88,6 +89,23 @@ describe("Spot account config", () => {
         config({ token: "resolved-token", avatar: { joinOnStart: true } }),
       ),
     ).toThrow(/joinOnStart.*worldId/);
+  });
+
+  it("requires orgId when organization channel monitoring is enabled", () => {
+    expect(() =>
+      resolveSpotAccount(
+        config({ token: "resolved-token", monitorOrgChannels: true }),
+      ),
+    ).toThrow(/monitorOrgChannels.*orgId/);
+    expect(
+      resolveSpotAccount(
+        config({
+          token: "resolved-token",
+          orgId: "org-1",
+          monitorOrgChannels: true,
+        }),
+      ).monitorOrgChannels,
+    ).toBe(true);
   });
 
   it("writes setup input into the default channel account", () => {

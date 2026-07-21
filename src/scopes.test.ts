@@ -19,13 +19,28 @@ const account = (
   allowBotMessages: false,
   subscribeWorlds: [],
   subscribeThreads: [],
+  monitorOrgChannels: false,
   ...patch,
 });
 
 describe("Spot scope health", () => {
-  it("always requires EventRead and EventWrite for channel operation", () => {
+  it("keeps room-only chat on the least-privilege event scopes", () => {
     expect(requiredSpotScopes(account())).toEqual(["EventRead", "EventWrite"]);
     expect(missingSpotScopes(account(), ["EventRead"])).toEqual(["EventWrite"]);
+  });
+
+  it("requires thread scopes when organization channel monitoring is configured", () => {
+    expect(
+      requiredSpotScopes(
+        account({ orgId: "org-1", monitorOrgChannels: true }),
+      ),
+    ).toEqual(["EventRead", "EventWrite", "ThreadRead", "ThreadWrite"]);
+  });
+
+  it("requires thread scopes for explicitly subscribed named channels", () => {
+    expect(
+      requiredSpotScopes(account({ subscribeThreads: ["channel-1"] })),
+    ).toEqual(["EventRead", "EventWrite", "ThreadRead", "ThreadWrite"]);
   });
 
   it("requires WorldRead for configured world subscriptions", () => {
@@ -51,7 +66,11 @@ describe("Spot scope health", () => {
       "AvatarWrite",
     ]);
     expect(
-      formatMissingSpotScopes(configured, ["EventRead", "EventWrite", "WorldRead"]),
+      formatMissingSpotScopes(configured, [
+        "EventRead",
+        "EventWrite",
+        "WorldRead",
+      ]),
     ).toBe("Spot token is missing required scopes: AvatarWrite.");
   });
 });

@@ -2,17 +2,22 @@ import type { OpenClawConfig, PluginRuntime } from "openclaw/plugin-sdk/core";
 import { describe, expect, it, vi } from "vitest";
 
 import {
+  applySpotSubscriptionAck,
   avatarLeaseRenewalIntervalMs,
   BoundedKeyedTaskQueue,
   DEFAULT_SPOT_AVATAR_TTL_SECONDS,
   dispatchSpotMessage,
   reconnectDelayMs,
   resolveAvatarLeaseTtlSeconds,
+  resolveSpotSubscribedThreads,
   runManagedAvatarLease,
   selectGatewayHealthIssue,
   shouldAcceptSpotEventFrame,
   shouldActivateSpotMessage,
   SpotHelloEventBuffer,
+  subscribeSpotChannelLifecycle,
+  subscribeSpotGatewayTargets,
+  unsubscribeSpotChannelLifecycle,
 } from "./gateway.js";
 import type { SpotClient } from "./client.js";
 import {
@@ -37,6 +42,7 @@ const account = (
   allowBotMessages: false,
   subscribeWorlds: [],
   subscribeThreads: [],
+  monitorOrgChannels: false,
   ...patch,
 });
 
@@ -45,7 +51,7 @@ const event = (patch: Partial<SpotMessageEvent> = {}): SpotMessageEvent => ({
   threadId: "thread-1",
   thread: {
     id: "thread-1",
-    type: "spot",
+    type: "Spot",
     name: "Lobby",
     orgId: "org-1",
     isPrivate: false,
@@ -143,6 +149,23 @@ describe("Spot Agent Gateway policy", () => {
         event(),
       ),
     ).toBe(false);
+  });
+
+  it("treats participant followups in an existing reply thread as actionable", () => {
+    expect(
+      shouldActivateSpotMessage(
+        account({ activationMode: "mentions", allowFrom: ["user-1"] }),
+        event({
+          threadId: "reply-thread-1",
+          thread: {
+            ...event().thread,
+            id: "reply-thread-1",
+            type: "Event",
+            parentEventId: "root-event-1",
+          },
+        }),
+      ),
+    ).toBe(true);
   });
 
   it("serializes each thread, runs different threads concurrently, and bounds backlog", async () => {
@@ -243,6 +266,279 @@ describe("Spot Agent Gateway policy", () => {
     expect(consumed).toEqual([1, 2, 4]);
   });
 
+  it("combines configured threads with viewable organization channels", async () => {
+    const client = {
+      getOrgThreads: vi.fn().mockResolvedValue([
+        { id: "channel-1", type: "Channel" },
+        { id: "configured-1", type: "Channel" },
+        { id: "reply-1", type: "Event" },
+      ]),
+    } as unknown as SpotClient;
+    await expect(
+      resolveSpotSubscribedThreads(
+        client,
+        account({
+          orgId: "org-1",
+          monitorOrgChannels: true,
+          subscribeThreads: ["configured-1"],
+        }),
+      ),
+    ).resolves.toEqual(["configured-1", "channel-1"]);
+  });
+
+  it("subscribes configured targets before optional org discovery settles", async () => {
+    let rejectDiscovery!: (error: Error) => void;
+    const discovery = new Promise<never>((_resolve, reject) => {
+      rejectDiscovery = reject;
+    });
+    const ws = { send: vi.fn() };
+    const subscription = subscribeSpotGatewayTargets({
+      ws: ws as never,
+      client: {
+        getOrgThreads: vi.fn().mockReturnValue(discovery),
+      },
+      account: account({
+        orgId: "org-1",
+        worldId: "world-1",
+        subscribeThreads: ["configured-1"],
+        monitorOrgChannels: true,
+      }),
+      connectionId: "connection-1",
+    });
+
+    expect(ws.send).toHaveBeenCalledOnce();
+    expect(JSON.parse(ws.send.mock.calls[0]![0] as string)).toMatchObject({
+      op: "subscribe",
+      id: "openclaw-connection-1",
+      worlds: ["world-1"],
+      threads: ["configured-1"],
+    });
+    rejectDiscovery(new Error("discovery unavailable"));
+    await expect(subscription).rejects.toThrow("discovery unavailable");
+  });
+
+  it("adds discovered channels in a second subscription without duplicating configured ids", async () => {
+    const ws = { send: vi.fn() };
+    await subscribeSpotGatewayTargets({
+      ws: ws as never,
+      client: {
+        getOrgThreads: vi.fn().mockResolvedValue([
+          { id: "configured-1", type: "Channel" },
+          { id: "channel-2", type: "Channel" },
+          { id: "reply-1", type: "Event" },
+        ]),
+      },
+      account: account({
+        orgId: "org-1",
+        subscribeThreads: ["configured-1"],
+        monitorOrgChannels: true,
+      }),
+      connectionId: "connection-1",
+    });
+
+    expect(ws.send).toHaveBeenCalledTimes(2);
+    expect(JSON.parse(ws.send.mock.calls[1]![0] as string)).toEqual({
+      op: "subscribe",
+      id: "openclaw-org-connection-1",
+      threads: ["channel-2"],
+    });
+  });
+
+  it("subscribes newly created viewable channels while monitoring is active", () => {
+    const ws = { send: vi.fn() };
+    const requestedThreadIds = new Set(["channel-1"]);
+    const subscribed = subscribeSpotChannelLifecycle({
+      ws: ws as never,
+      account: account({
+        orgId: "org-1",
+        monitorOrgChannels: true,
+      }),
+      frame: {
+        op: "event",
+        seq: 42,
+        type: "channel.created",
+        ts: "2026-07-20T12:00:00.000Z",
+        orgId: "org-1",
+        payload: {
+          thread: { id: "channel-2", type: "Channel" },
+        },
+      },
+      requestedThreadIds,
+    });
+
+    expect(subscribed).toBe(true);
+    expect(requestedThreadIds).toContain("channel-2");
+    expect(JSON.parse(ws.send.mock.calls[0]![0] as string)).toEqual({
+      op: "subscribe",
+      id: "openclaw-channel-42",
+      threads: ["channel-2"],
+    });
+  });
+
+  it.each(["conversation.joined", "channel.updated"])(
+    "re-subscribes a viewable channel on %s even when it was previously requested",
+    (type) => {
+      const ws = { send: vi.fn() };
+      const requestedThreadIds = new Set(["channel-2"]);
+      expect(
+        subscribeSpotChannelLifecycle({
+          ws: ws as never,
+          account: account({ orgId: "org-1", monitorOrgChannels: true }),
+          frame: {
+            op: "event",
+            seq: 44,
+            type,
+            ts: "2026-07-20T12:00:00.000Z",
+            orgId: "org-1",
+            payload: { thread: { id: "channel-2", type: "Channel" } },
+          },
+          requestedThreadIds,
+        }),
+      ).toBe(true);
+      expect(JSON.parse(ws.send.mock.calls[0]![0] as string)).toMatchObject({
+        op: "subscribe",
+        threads: ["channel-2"],
+      });
+    },
+  );
+
+  it("restores an explicitly selected private channel after the bot rejoins", () => {
+    const ws = { send: vi.fn() };
+    const requestedThreadIds = new Set<string>();
+    expect(
+      subscribeSpotChannelLifecycle({
+        ws: ws as never,
+        account: account({ subscribeThreads: ["private-channel-1"] }),
+        frame: {
+          op: "event",
+          seq: 46,
+          type: "conversation.joined",
+          ts: "2026-07-20T12:00:00.000Z",
+          orgId: "org-1",
+          payload: {
+            thread: { id: "private-channel-1", type: "Channel" },
+          },
+        },
+        requestedThreadIds,
+      }),
+    ).toBe(true);
+    expect(requestedThreadIds).toContain("private-channel-1");
+    expect(JSON.parse(ws.send.mock.calls[0]![0] as string)).toMatchObject({
+      op: "subscribe",
+      threads: ["private-channel-1"],
+    });
+  });
+
+  it("unsubscribes deleted channels so they do not consume subscription slots", () => {
+    const ws = { send: vi.fn() };
+    const requestedThreadIds = new Set(["channel-1", "channel-2"]);
+    const unsubscribed = unsubscribeSpotChannelLifecycle({
+      ws: ws as never,
+      account: account({ orgId: "org-1", monitorOrgChannels: true }),
+      frame: {
+        op: "event",
+        seq: 43,
+        type: "channel.deleted",
+        ts: "2026-07-20T12:00:00.000Z",
+        orgId: "org-1",
+        payload: { threadId: "channel-2" },
+      },
+      requestedThreadIds,
+    });
+
+    expect(unsubscribed).toBe(true);
+    expect(requestedThreadIds).not.toContain("channel-2");
+    expect(JSON.parse(ws.send.mock.calls[0]![0] as string)).toEqual({
+      op: "unsubscribe",
+      id: "openclaw-channel-43",
+      threads: ["channel-2"],
+    });
+  });
+
+  it("unsubscribes a private channel when the bot leaves it", () => {
+    const ws = { send: vi.fn() };
+    const requestedThreadIds = new Set(["private-channel-1"]);
+    expect(
+      unsubscribeSpotChannelLifecycle({
+        ws: ws as never,
+        account: account({ orgId: "org-1", monitorOrgChannels: true }),
+        frame: {
+          op: "event",
+          seq: 45,
+          type: "conversation.left",
+          ts: "2026-07-20T12:00:00.000Z",
+          orgId: "org-1",
+          payload: {
+            thread: { id: "private-channel-1", type: "Channel" },
+          },
+        },
+        requestedThreadIds,
+      }),
+    ).toBe(true);
+    expect(requestedThreadIds).not.toContain("private-channel-1");
+    expect(JSON.parse(ws.send.mock.calls[0]![0] as string)).toMatchObject({
+      op: "unsubscribe",
+      threads: ["private-channel-1"],
+    });
+  });
+
+  it("releases an explicitly selected private channel when the bot leaves it", () => {
+    const ws = { send: vi.fn() };
+    const requestedThreadIds = new Set(["private-channel-1"]);
+    expect(
+      unsubscribeSpotChannelLifecycle({
+        ws: ws as never,
+        account: account({ subscribeThreads: ["private-channel-1"] }),
+        frame: {
+          op: "event",
+          seq: 47,
+          type: "conversation.left",
+          ts: "2026-07-20T12:00:00.000Z",
+          orgId: "org-1",
+          payload: {
+            thread: { id: "private-channel-1", type: "Channel" },
+          },
+        },
+        requestedThreadIds,
+      }),
+    ).toBe(true);
+    expect(requestedThreadIds).not.toContain("private-channel-1");
+    expect(JSON.parse(ws.send.mock.calls[0]![0] as string)).toMatchObject({
+      op: "unsubscribe",
+      threads: ["private-channel-1"],
+    });
+  });
+
+  it("keeps earlier subscription rejections unhealthy across later successful acks", () => {
+    const rejections = new Map<string, string>();
+    expect(
+      applySpotSubscriptionAck(rejections, {
+        op: "ack",
+        id: "first",
+        subscribed: { threads: [], worlds: [] },
+        rejected: [
+          { kind: "thread", id: "channel-1", code: "limit_exceeded" },
+        ],
+      }),
+    ).toContain("thread:channel-1 (limit_exceeded)");
+    expect(
+      applySpotSubscriptionAck(rejections, {
+        op: "ack",
+        id: "second",
+        subscribed: { threads: ["channel-2"], worlds: [] },
+        rejected: [],
+      }),
+    ).toContain("thread:channel-1 (limit_exceeded)");
+    expect(
+      applySpotSubscriptionAck(rejections, {
+        op: "ack",
+        id: "retry",
+        subscribed: { threads: ["channel-1"], worlds: [] },
+        rejected: [],
+      }),
+    ).toBeUndefined();
+  });
+
   it("caps exponential reconnect delay and applies bounded jitter", () => {
     expect(reconnectDelayMs(0, () => 0.5)).toBe(1_000);
     expect(reconnectDelayMs(3, () => 0.5)).toBe(8_000);
@@ -312,7 +608,12 @@ describe("Spot Agent Gateway policy", () => {
     );
     expect(dispatchReply).toHaveBeenCalledWith(
       expect.objectContaining({
-        replyOptions: { abortSignal: abortController.signal },
+        replyOptions: expect.objectContaining({
+          abortSignal: abortController.signal,
+          onReplyStart: expect.any(Function),
+          onTypingCleanup: expect.any(Function),
+          typingKeepalive: true,
+        }),
       }),
     );
     expect(sendThreadMessage).toHaveBeenCalledWith(
@@ -321,6 +622,253 @@ describe("Spot Agent Gateway policy", () => {
       { signal: abortController.signal },
     );
     expect(dispatchReply).toHaveBeenCalledOnce();
+  });
+
+  it("keeps passive channel activity on the parent without typing or creating a reply thread", async () => {
+    const buildContext = vi.fn((value: unknown) => value);
+    const dispatchReply = vi.fn(async (options: Record<string, any>) => {
+      expect(options.ctxPayload.message.inboundEventKind).toBe("room_event");
+      expect(options.ctxPayload.reply).toMatchObject({
+        to: "thread:channel-1",
+        replyToId: "root-event-1",
+        messageThreadId: "channel-1",
+      });
+      expect(options.replyOptions).toMatchObject({ suppressTyping: true });
+    });
+    const runtime = {
+      routing: {
+        resolveAgentRoute: vi.fn().mockReturnValue({
+          agentId: "main",
+          sessionKey: "agent:main:spot:group:channel-1",
+        }),
+      },
+      inbound: { buildContext, dispatchReply },
+      session: {
+        resolveStorePath: vi.fn().mockReturnValue("/tmp/sessions.json"),
+        recordInboundSession: vi.fn(),
+      },
+      reply: { dispatchReplyWithBufferedBlockDispatcher: vi.fn() },
+    } as unknown as PluginRuntime["channel"];
+    const client = {
+      getOrCreateEventThread: vi.fn(),
+      setThreadTyping: vi.fn(),
+      sendThreadMessage: vi.fn(),
+    } as unknown as SpotClient;
+
+    await dispatchSpotMessage({
+      cfg: {
+        messages: { groupChat: { unmentionedInbound: "room_event" } },
+      } as OpenClawConfig,
+      account: account({ activationMode: "all", allowFrom: ["user-1"] }),
+      runtime,
+      client,
+      event: event({
+        id: "root-event-1",
+        threadId: "channel-1",
+        thread: {
+          ...event().thread,
+          id: "channel-1",
+          type: "Channel",
+          spotId: null,
+        },
+      }),
+    });
+
+    expect(client.getOrCreateEventThread).not.toHaveBeenCalled();
+    expect(client.setThreadTyping).not.toHaveBeenCalled();
+    expect(runtime.routing.resolveAgentRoute).toHaveBeenCalledOnce();
+  });
+
+  it("pre-creates a child for an actionable channel message, types on the visible parent, and replies in the child", async () => {
+    const buildContext = vi.fn((value: unknown) => value);
+    const sendThreadMessage = vi.fn().mockResolvedValue({ id: "reply-event-1" });
+    const setThreadTyping = vi.fn().mockResolvedValue(undefined);
+    const dispatchReply = vi.fn(async (options: Record<string, any>) => {
+      expect(options.ctxPayload.message.inboundEventKind).toBe("user_request");
+      expect(options.ctxPayload.reply).toMatchObject({
+        to: "thread:reply-thread-1",
+        messageThreadId: "reply-thread-1",
+      });
+      expect(options.ctxPayload.conversation).toMatchObject({
+        id: "reply-thread-1",
+        parentId: "channel-1",
+      });
+      expect(options.ctxPayload.route).toMatchObject({
+        routeSessionKey: "agent:main:spot:group:reply-thread-1",
+        parentSessionKey: "agent:main:spot:group:channel-1",
+        modelParentSessionKey: "agent:main:spot:group:channel-1",
+      });
+      await options.replyOptions.onReplyStart();
+      await options.delivery.deliver({ text: "reply" });
+      options.replyOptions.onTypingCleanup();
+    });
+    const resolveAgentRoute = vi.fn(({ peer }: { peer: { id: string } }) => ({
+      agentId: "main",
+      sessionKey: `agent:main:spot:group:${peer.id}`,
+    }));
+    const runtime = {
+      routing: { resolveAgentRoute },
+      inbound: { buildContext, dispatchReply },
+      session: {
+        resolveStorePath: vi.fn().mockReturnValue("/tmp/sessions.json"),
+        recordInboundSession: vi.fn(),
+      },
+      reply: { dispatchReplyWithBufferedBlockDispatcher: vi.fn() },
+    } as unknown as PluginRuntime["channel"];
+    const client = {
+      getOrCreateEventThread: vi.fn().mockResolvedValue({ id: "reply-thread-1" }),
+      setThreadTyping,
+      sendThreadMessage,
+    } as unknown as SpotClient;
+
+    await dispatchSpotMessage({
+      cfg: {
+        messages: { groupChat: { unmentionedInbound: "room_event" } },
+      } as OpenClawConfig,
+      account: account({ activationMode: "all", allowFrom: ["user-1"] }),
+      runtime,
+      client,
+      event: event({
+        id: "root-event-1",
+        threadId: "channel-1",
+        isMentioned: true,
+        thread: {
+          ...event().thread,
+          id: "channel-1",
+          type: "Channel",
+          spotId: null,
+        },
+      }),
+    });
+
+    expect(client.getOrCreateEventThread).toHaveBeenCalledWith("root-event-1", {
+      signal: undefined,
+    });
+    expect(resolveAgentRoute).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({
+        peer: { kind: "group", id: "reply-thread-1" },
+        parentPeer: { kind: "group", id: "channel-1" },
+      }),
+    );
+    await vi.waitFor(() => {
+      expect(setThreadTyping).toHaveBeenCalledWith("channel-1", false, {
+        signal: undefined,
+      });
+      expect(setThreadTyping).toHaveBeenCalledWith("channel-1", true);
+    });
+    expect(
+      setThreadTyping.mock.calls.every(([threadId]) => threadId === "channel-1"),
+    ).toBe(true);
+    expect(sendThreadMessage).toHaveBeenCalledWith(
+      "reply-thread-1",
+      "reply",
+      { signal: undefined },
+    );
+  });
+
+  it("links a reply-thread followup to the ambient root channel session", async () => {
+    const buildContext = vi.fn((value: unknown) => value);
+    const dispatchReply = vi.fn();
+    const resolveAgentRoute = vi.fn(
+      ({ peer }: { peer: { id: string } }) => ({
+        agentId: "channel-agent",
+        sessionKey: `agent:channel-agent:spot:group:${peer.id}`,
+      }),
+    );
+    const runtime = {
+      routing: { resolveAgentRoute },
+      inbound: { buildContext, dispatchReply },
+      session: {
+        resolveStorePath: vi.fn().mockReturnValue("/tmp/sessions.json"),
+        recordInboundSession: vi.fn(),
+      },
+      reply: { dispatchReplyWithBufferedBlockDispatcher: vi.fn() },
+    } as unknown as PluginRuntime["channel"];
+    const client = {
+      getEvent: vi.fn().mockResolvedValue({
+        id: "root-event-1",
+        threadId: "channel-1",
+      }),
+      getOrCreateEventThread: vi.fn(),
+      setThreadTyping: vi.fn(),
+      sendThreadMessage: vi.fn(),
+    } as unknown as SpotClient;
+
+    await dispatchSpotMessage({
+      cfg: {
+        messages: { groupChat: { unmentionedInbound: "room_event" } },
+      } as OpenClawConfig,
+      account: account({ activationMode: "all", allowFrom: ["user-1"] }),
+      runtime,
+      client,
+      event: event({
+        id: "root-event-1",
+        threadId: "channel-1",
+        thread: {
+          ...event().thread,
+          id: "channel-1",
+          type: "Channel",
+          spotId: null,
+        },
+      }),
+    });
+    await dispatchSpotMessage({
+      cfg: {
+        messages: { groupChat: { unmentionedInbound: "room_event" } },
+      } as OpenClawConfig,
+      account: account({ activationMode: "mentions", allowFrom: ["user-1"] }),
+      runtime,
+      client,
+      event: event({
+        id: "followup-event-1",
+        threadId: "reply-thread-1",
+        isMentioned: false,
+        thread: {
+          ...event().thread,
+          id: "reply-thread-1",
+          type: "Event",
+          name: null,
+          spotId: null,
+          parentEventId: "root-event-1",
+        },
+      }),
+    });
+
+    expect(client.getEvent).toHaveBeenCalledWith("root-event-1", {
+      signal: undefined,
+    });
+    expect(resolveAgentRoute).toHaveBeenCalledWith(
+      expect.objectContaining({
+        peer: { kind: "group", id: "reply-thread-1" },
+        parentPeer: { kind: "group", id: "channel-1" },
+      }),
+    );
+    expect(buildContext).toHaveBeenCalledWith(
+      expect.objectContaining({
+        conversation: expect.objectContaining({
+          id: "reply-thread-1",
+          parentId: "channel-1",
+        }),
+        route: expect.objectContaining({
+          routeSessionKey:
+            "agent:channel-agent:spot:group:reply-thread-1",
+          parentSessionKey: "agent:channel-agent:spot:group:channel-1",
+          modelParentSessionKey:
+            "agent:channel-agent:spot:group:channel-1",
+        }),
+      }),
+    );
+    const [rootContext, childContext] = buildContext.mock.calls.map(
+      ([context]) => context as Record<string, any>,
+    );
+    expect(rootContext.route).toMatchObject({
+      routeSessionKey: "agent:channel-agent:spot:group:channel-1",
+    });
+    expect(rootContext.route).not.toHaveProperty("parentSessionKey");
+    expect(childContext.message.inboundEventKind).toBe("user_request");
+    expect(childContext.reply.to).toBe("thread:reply-thread-1");
+    expect(client.getOrCreateEventThread).not.toHaveBeenCalled();
   });
 });
 

@@ -3,6 +3,8 @@ import type { ResolvedSpotAccount } from "./types.js";
 export const SPOT_SCOPE = {
   EventRead: "EventRead",
   EventWrite: "EventWrite",
+  ThreadRead: "ThreadRead",
+  ThreadWrite: "ThreadWrite",
   WorldRead: "WorldRead",
   AvatarWrite: "AvatarWrite",
 } as const;
@@ -11,6 +13,9 @@ export const requiredSpotScopes = (
   account: ResolvedSpotAccount,
 ): string[] => {
   const required: string[] = [SPOT_SCOPE.EventRead, SPOT_SCOPE.EventWrite];
+  if (account.monitorOrgChannels || account.subscribeThreads.length > 0) {
+    required.push(SPOT_SCOPE.ThreadRead, SPOT_SCOPE.ThreadWrite);
+  }
   if (
     account.worldId ||
     account.subscribeWorlds.length > 0 ||

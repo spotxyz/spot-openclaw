@@ -29,6 +29,7 @@ export interface SpotAccountConfig {
   worldId?: string;
   subscribeWorlds?: string[];
   subscribeThreads?: string[];
+  monitorOrgChannels?: boolean;
   defaultTarget?: string;
   activationMode?: SpotActivationMode;
   allowFrom?: string[];
@@ -51,6 +52,7 @@ export interface ResolvedSpotAccount
   allowBotMessages: boolean;
   subscribeWorlds: string[];
   subscribeThreads: string[];
+  monitorOrgChannels: boolean;
 }
 
 export interface SpotUserSummary {
@@ -163,4 +165,10 @@ export interface SpotCreatedMessage {
   id: string;
   threadId?: string;
   [key: string]: unknown;
+}
+
+export interface SpotEventReaction {
+  id: string;
+  userId: string;
+  emoji: string;
 }

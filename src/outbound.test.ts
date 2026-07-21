@@ -16,6 +16,7 @@ import {
   chunkSpotText,
   normalizeSpotTarget,
   parseSpotTarget,
+  resolveSpotReplyDestination,
   SPOT_MESSAGE_MAX_LENGTH,
   spotOutboundAdapter,
 } from "./outbound.js";
@@ -48,7 +49,7 @@ describe("Spot target grammar", () => {
     expect(() => normalizeSpotTarget("thread:   ")).toThrow(/empty/);
   });
 
-  it("enforces Spot's 12,000-character boundary and advertises no native replyTo", () => {
+  it("enforces Spot's 12,000-character boundary and advertises durable replies", () => {
     const boundary = "x".repeat(SPOT_MESSAGE_MAX_LENGTH);
     expect(chunkSpotText(boundary)).toEqual([boundary]);
 
@@ -62,9 +63,56 @@ describe("Spot target grammar", () => {
     expect(spotOutboundAdapter.textChunkLimit).toBe(12_000);
     expect(spotOutboundAdapter.deliveryCapabilities?.durableFinal).toMatchObject({
       text: true,
-      replyTo: false,
+      replyTo: true,
       thread: true,
     });
+  });
+
+  it("creates a child only when replyToId belongs to a named channel", async () => {
+    const channelClient = {
+      baseUrl: "https://spot.test",
+      getEvent: vi.fn().mockResolvedValue({ id: "event-1", threadId: "channel-1" }),
+      getThread: vi.fn().mockResolvedValue({ id: "channel-1", type: "Channel" }),
+      getOrCreateEventThread: vi.fn().mockResolvedValue({ id: "reply-thread-1" }),
+    } as unknown as SpotClient;
+    await expect(
+      resolveSpotReplyDestination(channelClient, "channel-1", "event-1"),
+    ).resolves.toBe("reply-thread-1");
+    expect(channelClient.getOrCreateEventThread).toHaveBeenCalledWith("event-1");
+
+    const roomClient = {
+      baseUrl: "https://spot.test",
+      getEvent: vi.fn().mockResolvedValue({ id: "event-2", threadId: "room-1" }),
+      getThread: vi.fn().mockResolvedValue({ id: "room-1", type: "Spot" }),
+      getOrCreateEventThread: vi.fn(),
+    } as unknown as SpotClient;
+    await expect(
+      resolveSpotReplyDestination(roomClient, "unrelated", "event-2"),
+    ).resolves.toBe("room-1");
+    expect(roomClient.getOrCreateEventThread).not.toHaveBeenCalled();
+  });
+
+  it("coalesces concurrent reply-thread creation for the same channel event", async () => {
+    let resolveThread!: (value: { id: string }) => void;
+    const pending = new Promise<{ id: string }>((resolve) => {
+      resolveThread = resolve;
+    });
+    const client = {
+      baseUrl: "https://spot.test",
+      getEvent: vi.fn().mockResolvedValue({ id: "event-race", threadId: "channel-1" }),
+      getThread: vi.fn().mockResolvedValue({ id: "channel-1", type: "Channel" }),
+      getOrCreateEventThread: vi.fn().mockReturnValue(pending),
+    } as unknown as SpotClient;
+    const first = resolveSpotReplyDestination(client, "channel-1", "event-race");
+    const second = resolveSpotReplyDestination(client, "channel-1", "event-race");
+    await vi.waitFor(() =>
+      expect(client.getOrCreateEventThread).toHaveBeenCalledOnce(),
+    );
+    resolveThread({ id: "reply-race" });
+    await expect(Promise.all([first, second])).resolves.toEqual([
+      "reply-race",
+      "reply-race",
+    ]);
   });
 
   it("uses group session identity for durable room threads", async () => {

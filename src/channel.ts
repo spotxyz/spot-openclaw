@@ -6,6 +6,7 @@ import {
   type ChannelPlugin,
 } from "openclaw/plugin-sdk/channel-core";
 
+import { spotMessageActions } from "./actions.js";
 import { SpotClient } from "./client.js";
 import {
   applySpotAccountConfig,
@@ -87,7 +88,8 @@ const sharedBase = createChannelPluginBase<ResolvedSpotAccount>({
     },
     capabilities: {
       chatTypes: ["direct", "group", "thread"],
-      reply: false,
+      reply: true,
+      reactions: true,
       threads: true,
       media: false,
       blockStreaming: false,
@@ -110,6 +112,7 @@ const sharedBase = createChannelPluginBase<ResolvedSpotAccount>({
         "worldId",
         "subscribeWorlds",
         "subscribeThreads",
+        "monitorOrgChannels",
         "defaultTarget",
         "activationMode",
         "allowFrom",
@@ -153,9 +156,14 @@ const sharedBase = createChannelPluginBase<ResolvedSpotAccount>({
     agentPrompt: {
       messageToolHints: () => [
         "Spot conversations use thread:<threadId> targets. Use user:<userId> only to get or create a direct-message thread.",
+        "In a named Spot channel, reply to the current message normally; the connector creates or reuses that message's Spot reply thread. Use message(action=react) and message(action=reactions) with Spot event ids for reactions.",
         "Avatar world operations use the configured worldId and the spot_* avatar tools; a gateway message does not contain a worldId.",
       ],
-      messageToolCapabilities: () => ["send text to Spot threads"],
+      messageToolCapabilities: () => [
+        "send text to Spot threads",
+        "reply in named-channel threads",
+        "add, remove, and list message reactions",
+      ],
       inboundFormattingHints: () => ({
         text_markup: "plain text with optional Markdown",
         rules: ["Treat the inbound Spot thread id as the durable reply target."],
@@ -251,6 +259,7 @@ const base = {
     }),
   },
   message: spotMessageAdapter,
+  actions: spotMessageActions,
   messaging: {
     targetPrefixes: [SPOT_CHANNEL_ID],
     normalizeTarget: (raw) => {
@@ -309,6 +318,6 @@ export const spotChannelPlugin = createChatChannelPlugin<
       allowFromPathSuffix: "allowFrom",
     },
   },
-  threading: { topLevelReplyToMode: "off" },
+  threading: { resolveReplyToMode: () => "all" },
   outbound: spotOutboundAdapter,
 });

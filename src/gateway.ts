@@ -2,6 +2,11 @@ import type {
   ChannelGatewayContext,
   ChannelLogSink,
 } from "openclaw/plugin-sdk/channel-runtime";
+import { createTypingCallbacks } from "openclaw/plugin-sdk/channel-runtime";
+import {
+  classifyChannelInboundEvent,
+  resolveUnmentionedGroupInboundPolicy,
+} from "openclaw/plugin-sdk/channel-inbound";
 import type { PluginRuntime } from "openclaw/plugin-sdk/core";
 import WebSocket, { type ClientOptions, type RawData } from "ws";
 
@@ -17,9 +22,9 @@ import { formatMissingSpotScopes, SPOT_SCOPE } from "./scopes.js";
 import {
   SPOT_CHANNEL_ID,
   type ResolvedSpotAccount,
+  type SpotAckFrame,
   type SpotAvatarStartupConfig,
   type SpotEventFrame,
-  type SpotHelloFrame,
   type SpotMessageEvent,
   type SpotMessagePayload,
   type SpotServerFrame,
@@ -362,6 +367,16 @@ const isMessagePayload = (value: unknown): value is SpotMessagePayload => {
   );
 };
 
+const getChannelLifecycleThreadId = (value: unknown): string | undefined => {
+  if (!value || typeof value !== "object") return undefined;
+  const thread = (value as { thread?: unknown }).thread;
+  if (!thread || typeof thread !== "object") return undefined;
+  const record = thread as Record<string, unknown>;
+  return record.type === "Channel" && typeof record.id === "string"
+    ? record.id
+    : undefined;
+};
+
 export const shouldActivateSpotMessage = (
   account: ResolvedSpotAccount,
   event: SpotMessageEvent,
@@ -375,6 +390,7 @@ export const shouldActivateSpotMessage = (
   ) {
     return false;
   }
+  if (event.thread.type === "Event" && event.thread.parentEventId) return true;
   switch (account.activationMode) {
     case "all":
       return true;
@@ -389,22 +405,159 @@ const unique = (values: Array<string | undefined>): string[] => [
   ...new Set(values.filter((value): value is string => !!value)),
 ];
 
-const subscribeAfterHello = (
-  ws: WebSocket,
+export const resolveSpotSubscribedThreads = async (
+  client: Pick<SpotClient, "getOrgThreads">,
   account: ResolvedSpotAccount,
-  hello: SpotHelloFrame,
+  options?: { signal?: AbortSignal },
+): Promise<string[]> => {
+  const configured = unique(account.subscribeThreads);
+  if (!account.monitorOrgChannels) return configured;
+  const channels = await client.getOrgThreads(account.orgId!, options);
+  return unique([
+    ...configured,
+    ...channels
+      .filter((thread) => thread.type === "Channel")
+      .map((thread) => thread.id),
+  ]);
+};
+
+const sendSubscription = (
+  ws: WebSocket,
+  id: string,
+  targets: { worlds?: string[]; threads?: string[] },
+  op: "subscribe" | "unsubscribe" = "subscribe",
 ): void => {
-  const worlds = unique([account.worldId, ...account.subscribeWorlds]);
-  const threads = unique(account.subscribeThreads);
+  const worlds = unique(targets.worlds ?? []);
+  const threads = unique(targets.threads ?? []);
   if (worlds.length === 0 && threads.length === 0) return;
   ws.send(
     JSON.stringify({
-      op: "subscribe",
-      id: `openclaw-${hello.connectionId}`,
+      op,
+      id,
       ...(worlds.length > 0 ? { worlds } : {}),
       ...(threads.length > 0 ? { threads } : {}),
     }),
   );
+};
+
+export const subscribeSpotGatewayTargets = async (params: {
+  ws: Pick<WebSocket, "send">;
+  client: Pick<SpotClient, "getOrgThreads">;
+  account: ResolvedSpotAccount;
+  connectionId: string;
+  requestedThreadIds?: Set<string>;
+  signal?: AbortSignal;
+}): Promise<Set<string>> => {
+  const requestedThreadIds =
+    params.requestedThreadIds ?? new Set(params.account.subscribeThreads);
+  sendSubscription(params.ws as WebSocket, `openclaw-${params.connectionId}`, {
+    worlds: unique([
+      params.account.worldId,
+      ...params.account.subscribeWorlds,
+    ]),
+    threads: [...requestedThreadIds],
+  });
+  if (!params.account.monitorOrgChannels) return requestedThreadIds;
+  const allThreads = await resolveSpotSubscribedThreads(
+    params.client,
+    params.account,
+    params.signal ? { signal: params.signal } : undefined,
+  );
+  const discovered = allThreads.filter(
+    (threadId) => !requestedThreadIds.has(threadId),
+  );
+  for (const threadId of discovered) requestedThreadIds.add(threadId);
+  sendSubscription(
+    params.ws as WebSocket,
+    `openclaw-org-${params.connectionId}`,
+    { threads: discovered },
+  );
+  return requestedThreadIds;
+};
+
+export const subscribeSpotChannelLifecycle = (params: {
+  ws: Pick<WebSocket, "send">;
+  account: ResolvedSpotAccount;
+  frame: SpotEventFrame;
+  requestedThreadIds: Set<string>;
+}): boolean => {
+  if (
+    params.frame.type !== "channel.created" &&
+    params.frame.type !== "channel.updated" &&
+    params.frame.type !== "conversation.joined"
+  ) {
+    return false;
+  }
+  const threadId = getChannelLifecycleThreadId(params.frame.payload);
+  if (
+    !threadId ||
+    (!params.account.monitorOrgChannels &&
+      !params.account.subscribeThreads.includes(threadId))
+  ) {
+    return false;
+  }
+  params.requestedThreadIds.add(threadId);
+  sendSubscription(
+    params.ws as WebSocket,
+    `openclaw-channel-${params.frame.seq}`,
+    { threads: [threadId] },
+  );
+  return true;
+};
+
+export const unsubscribeSpotChannelLifecycle = (params: {
+  ws: Pick<WebSocket, "send">;
+  account: ResolvedSpotAccount;
+  frame: SpotEventFrame;
+  requestedThreadIds: Set<string>;
+}): boolean => {
+  if (
+    (params.frame.type !== "channel.deleted" &&
+      params.frame.type !== "conversation.left") ||
+    !params.frame.payload ||
+    typeof params.frame.payload !== "object"
+  ) {
+    return false;
+  }
+  const threadId =
+    params.frame.type === "conversation.left"
+      ? getChannelLifecycleThreadId(params.frame.payload)
+      : (params.frame.payload as { threadId?: unknown }).threadId;
+  if (
+    typeof threadId !== "string" ||
+    (!params.account.monitorOrgChannels &&
+      !params.account.subscribeThreads.includes(threadId)) ||
+    !params.requestedThreadIds.has(threadId)
+  ) {
+    return false;
+  }
+  params.requestedThreadIds.delete(threadId);
+  sendSubscription(
+    params.ws as WebSocket,
+    `openclaw-channel-${params.frame.seq}`,
+    { threads: [threadId] },
+    "unsubscribe",
+  );
+  return true;
+};
+
+export const applySpotSubscriptionAck = (
+  rejections: Map<string, string>,
+  frame: SpotAckFrame,
+): string | undefined => {
+  for (const threadId of frame.subscribed.threads) {
+    rejections.delete(`thread:${threadId}`);
+  }
+  for (const worldId of frame.subscribed.worlds) {
+    rejections.delete(`world:${worldId}`);
+  }
+  for (const item of frame.rejected) {
+    rejections.set(`${item.kind}:${item.id}`, item.code);
+  }
+  if (rejections.size === 0) return undefined;
+  return `Spot rejected subscriptions: ${[...rejections]
+    .map(([target, code]) => `${target} (${code})`)
+    .join(", ")}`;
 };
 
 const updateStatus = (
@@ -426,21 +579,91 @@ export const dispatchSpotMessage = async (params: {
 }): Promise<void> => {
   const { cfg, account, runtime, client, event, log } = params;
   const isDirect = event.isDirectMessage;
-  const peer = {
+  const isChannel = event.thread.type === "Channel";
+  const isReplyThread =
+    event.thread.type === "Event" && !!event.thread.parentEventId;
+  const initialPeer = {
     kind: "group" as const,
     id: event.threadId,
   };
-  const route = runtime.routing.resolveAgentRoute({
+  let replyParentPeer: { kind: "group"; id: string } | undefined;
+  if (isReplyThread) {
+    const parentEvent = await client.getEvent(event.thread.parentEventId!, {
+      signal: params.signal,
+    });
+    if (!parentEvent.threadId) {
+      throw new Error("Spot returned a reply-thread parent without a thread id.");
+    }
+    replyParentPeer = { kind: "group", id: parentEvent.threadId };
+  }
+  const replyParentRoute = replyParentPeer
+    ? runtime.routing.resolveAgentRoute({
+        cfg,
+        channel: SPOT_CHANNEL_ID,
+        accountId: account.accountId,
+        peer: replyParentPeer,
+      })
+    : undefined;
+  const initialRoute = runtime.routing.resolveAgentRoute({
     cfg,
     channel: SPOT_CHANNEL_ID,
     accountId: account.accountId,
-    peer,
+    peer: initialPeer,
+    ...(replyParentPeer ? { parentPeer: replyParentPeer } : {}),
   });
+  const inboundEventKind = classifyChannelInboundEvent({
+    conversation: { kind: isDirect ? "direct" : "group" },
+    unmentionedGroupPolicy: resolveUnmentionedGroupInboundPolicy({
+      cfg,
+      agentId: initialRoute.agentId,
+    }),
+    wasMentioned: event.isMentioned || isReplyThread,
+  });
+  let deliveryThreadId = event.threadId;
+  if (isChannel && inboundEventKind === "user_request") {
+    const replyThread = await client.getOrCreateEventThread(event.id, {
+      signal: params.signal,
+    });
+    if (!replyThread.id) {
+      throw new Error(
+        "Spot created the channel reply thread but returned no thread id.",
+      );
+    }
+    deliveryThreadId = replyThread.id;
+  }
+  const peer = {
+    kind: "group" as const,
+    id: deliveryThreadId,
+  };
+  const route =
+    deliveryThreadId === event.threadId
+      ? initialRoute
+      : runtime.routing.resolveAgentRoute({
+          cfg,
+          channel: SPOT_CHANNEL_ID,
+          accountId: account.accountId,
+          peer,
+          parentPeer: initialPeer,
+        });
+  const parentRoute =
+    replyParentRoute ??
+    (isChannel && deliveryThreadId !== event.threadId
+      ? initialRoute
+      : undefined);
+  const parentPeer =
+    replyParentPeer ??
+    (isChannel && deliveryThreadId !== event.threadId
+      ? initialPeer
+      : undefined);
+  const sessionParentRoute =
+    parentRoute && parentRoute.sessionKey !== route.sessionKey
+      ? parentRoute
+      : undefined;
   const senderName =
     event.user?.displayName || event.user?.fullName || event.userId;
   const conversationLabel =
     event.thread.name || (isDirect ? senderName : `Spot ${event.thread.spotId ?? event.threadId}`);
-  const target = `thread:${event.threadId}`;
+  const target = `thread:${deliveryThreadId}`;
   const timestamp = Date.parse(event.timestamp);
   const context = runtime.inbound.buildContext({
     channel: SPOT_CHANNEL_ID,
@@ -456,9 +679,10 @@ export const dispatchSpotMessage = async (params: {
     },
     conversation: {
       kind: isDirect ? "direct" : "group",
-      id: event.threadId,
+      id: deliveryThreadId,
       label: conversationLabel,
-      threadId: event.threadId,
+      threadId: deliveryThreadId,
+      ...(parentPeer ? { parentId: parentPeer.id } : {}),
       routePeer: peer,
     },
     route: {
@@ -466,12 +690,18 @@ export const dispatchSpotMessage = async (params: {
       accountId: account.accountId,
       routeSessionKey: route.sessionKey,
       dispatchSessionKey: route.sessionKey,
+      ...(sessionParentRoute
+        ? {
+            parentSessionKey: sessionParentRoute.sessionKey,
+            modelParentSessionKey: sessionParentRoute.sessionKey,
+          }
+        : {}),
     },
     reply: {
       to: target,
       originatingTo: target,
       replyToId: event.id,
-      messageThreadId: event.threadId,
+      messageThreadId: deliveryThreadId,
       sourceReplyDeliveryMode: "thread",
     },
     message: {
@@ -479,6 +709,7 @@ export const dispatchSpotMessage = async (params: {
       bodyForAgent: event.text,
       commandBody: event.text,
       senderLabel: senderName,
+      inboundEventKind,
     },
     access: {
       commands: {
@@ -488,8 +719,9 @@ export const dispatchSpotMessage = async (params: {
         canDetectMention: true,
         wasMentioned: event.isMentioned,
         explicitlyMentionedBot: event.isMentioned,
-        requireMention: account.activationMode === "mentions",
-        effectiveWasMentioned: event.isMentioned,
+        requireMention:
+          account.activationMode === "mentions" && !isReplyThread,
+        effectiveWasMentioned: event.isMentioned || isReplyThread,
         shouldSkip: false,
       },
     },
@@ -505,6 +737,28 @@ export const dispatchSpotMessage = async (params: {
   const storePath = runtime.session.resolveStorePath(cfg.session?.store, {
     agentId: route.agentId,
   });
+  const typingCallbacks =
+    inboundEventKind === "user_request"
+      ? createTypingCallbacks({
+          start: () =>
+            client.setThreadTyping(
+              isChannel ? event.threadId : deliveryThreadId,
+              false,
+              {
+                signal: params.signal,
+              },
+            ),
+          stop: () =>
+            client.setThreadTyping(
+              isChannel ? event.threadId : deliveryThreadId,
+              true,
+            ),
+          onStartError: (error) =>
+            log?.warn(`Spot typing indicator failed: ${String(error)}`),
+          onStopError: (error) =>
+            log?.warn(`Spot typing cleanup failed: ${String(error)}`),
+        })
+      : undefined;
 
   await runtime.inbound.dispatchReply({
     cfg,
@@ -524,7 +778,7 @@ export const dispatchSpotMessage = async (params: {
         if (!text) return { visibleReplySent: false };
         const messageIds: string[] = [];
         for (const chunk of chunkSpotText(text)) {
-          const created = await client.sendThreadMessage(event.threadId, chunk, {
+          const created = await client.sendThreadMessage(deliveryThreadId, chunk, {
             signal: params.signal,
           });
           messageIds.push(created.id);
@@ -532,7 +786,7 @@ export const dispatchSpotMessage = async (params: {
         }
         return {
           messageIds,
-          threadId: event.threadId,
+          threadId: deliveryThreadId,
           visibleReplySent: true,
         };
       },
@@ -543,7 +797,16 @@ export const dispatchSpotMessage = async (params: {
       onRecordError: (error) =>
         log?.warn(`Spot session metadata update failed: ${String(error)}`),
     },
-    ...(params.signal ? { replyOptions: { abortSignal: params.signal } } : {}),
+    replyOptions: {
+      ...(params.signal ? { abortSignal: params.signal } : {}),
+      ...(typingCallbacks
+        ? {
+            onReplyStart: typingCallbacks.onReplyStart,
+            onTypingCleanup: () => typingCallbacks.onCleanup?.(),
+            typingKeepalive: true,
+          }
+        : { suppressTyping: true }),
+    },
   });
 };
 
@@ -557,6 +820,7 @@ interface ConnectionResult {
 export interface GatewayHealthIssues {
   scopeIssue?: string | undefined;
   subscriptionIssue?: string | undefined;
+  channelDiscoveryIssue?: string | undefined;
   gatewayIssue?: string | undefined;
   sequenceIssue?: string | undefined;
   avatarLeaseIssue?: string | undefined;
@@ -567,6 +831,7 @@ export const selectGatewayHealthIssue = (
 ): string | undefined =>
   issues.scopeIssue ??
   issues.subscriptionIssue ??
+  issues.channelDiscoveryIssue ??
   issues.gatewayIssue ??
   issues.sequenceIssue ??
   issues.avatarLeaseIssue;
@@ -592,6 +857,7 @@ const connectOnce = async (
     lastError: string | undefined;
     scopeIssue: string | undefined;
     subscriptionIssue: string | undefined;
+    channelDiscoveryIssue: string | undefined;
     gatewayIssue: string | undefined;
     sequenceIssue: string | undefined;
     avatarLeaseIssue: string | undefined;
@@ -601,6 +867,7 @@ const connectOnce = async (
     lastError: undefined,
     scopeIssue: undefined,
     subscriptionIssue: undefined,
+    channelDiscoveryIssue: undefined,
     gatewayIssue: undefined,
     sequenceIssue: undefined,
     avatarLeaseIssue: undefined,
@@ -629,6 +896,8 @@ const connectOnce = async (
   });
   const helloEventBuffer = new SpotHelloEventBuffer();
   const connectionController = new AbortController();
+  const requestedThreadIds = new Set(ctx.account.subscribeThreads);
+  const subscriptionRejections = new Map<string, string>();
   let avatarLeaseTask: Promise<void> | undefined;
 
   const handleControlFrame = (
@@ -643,7 +912,26 @@ const connectOnce = async (
           `Spot account is configured for organization ${ctx.account.orgId}, ` +
           "but the API token cannot access it.";
       }
-      subscribeAfterHello(ws, ctx.account, frame);
+      helloEventBuffer.open(handleEventFrame);
+      void subscribeSpotGatewayTargets({
+        ws,
+        client,
+        account: ctx.account,
+        connectionId: frame.connectionId,
+        requestedThreadIds,
+        signal: connectionController.signal,
+      })
+        .then(() => {
+          state.channelDiscoveryIssue = undefined;
+          refreshGatewayHealth();
+        })
+        .catch((error) => {
+          if (connectionController.signal.aborted) return;
+          state.channelDiscoveryIssue =
+            `Spot organization channel discovery failed: ${String(error)}`;
+          ctx.log?.warn(state.channelDiscoveryIssue);
+          refreshGatewayHealth();
+        });
       updateStatus(ctx, {
         lastConnectedAt: Date.now(),
       });
@@ -673,17 +961,15 @@ const connectOnce = async (
           refreshGatewayHealth();
         });
       }
-      helloEventBuffer.open(handleEventFrame);
       return;
     }
     if (frame.op === "ack") {
-      if (frame.rejected.length > 0) {
-        state.subscriptionIssue = `Spot rejected subscriptions: ${frame.rejected
-          .map((item) => `${item.kind}:${item.id} (${item.code})`)
-          .join(", ")}`;
+      state.subscriptionIssue = applySpotSubscriptionAck(
+        subscriptionRejections,
+        frame,
+      );
+      if (state.subscriptionIssue) {
         ctx.log?.warn(state.subscriptionIssue);
-      } else {
-        state.subscriptionIssue = undefined;
       }
       refreshGatewayHealth();
       return;
@@ -706,6 +992,18 @@ const connectOnce = async (
     }
     state.lastSeq = eventFrame.seq;
     if (!shouldAcceptSpotEventFrame(ctx.account, eventFrame)) return;
+    const channelLifecycleParams = {
+      ws,
+      account: ctx.account,
+      frame: eventFrame,
+      requestedThreadIds,
+    };
+    if (
+      subscribeSpotChannelLifecycle(channelLifecycleParams) ||
+      unsubscribeSpotChannelLifecycle(channelLifecycleParams)
+    ) {
+      return;
+    }
     if (eventFrame.type !== "message.created" || !isMessagePayload(eventFrame.payload)) {
       return;
     }

@@ -193,6 +193,11 @@
                 },
                 "uniqueItems": true
               },
+              "monitorOrgChannels": {
+                "type": "boolean",
+                "default": false,
+                "description": "Discover and subscribe to every viewable named channel in orgId. Spot currently accepts at most 100 explicit thread subscriptions per gateway connection."
+              },
               "defaultTarget": {
                 "type": "string",
                 "description": "Default outbound target, normally thread:<threadId>."
@@ -261,6 +266,11 @@
             },
             "uniqueItems": true
           },
+          "monitorOrgChannels": {
+            "type": "boolean",
+            "default": false,
+            "description": "Discover and subscribe to every viewable named channel in orgId. Spot currently accepts at most 100 explicit thread subscriptions per gateway connection."
+          },
           "defaultTarget": {
             "type": "string",
             "description": "Default outbound target, normally thread:<threadId>."
@@ -314,12 +324,16 @@
         },
         "token": {
           "label": "Spot API Token",
-          "help": "Bearer token with EventRead, EventWrite, WorldRead, AvatarWrite, and optionally ThreadWrite for initiated DMs. Token scopes do not replace the bot user's Spot role permissions.",
+          "help": "Bearer token with EventRead and EventWrite, plus ThreadRead/ThreadWrite for organization channel monitoring or explicit thread subscriptions, and WorldRead/AvatarWrite for world and avatar features. Token scopes do not replace the bot user's Spot role permissions.",
           "sensitive": true
         },
         "worldId": {
           "label": "Avatar World ID",
           "help": "World used by avatar tools and included in Agent Gateway subscriptions."
+        },
+        "monitorOrgChannels": {
+          "label": "Monitor Organization Channels",
+          "help": "Requires orgId, ThreadRead, and ThreadWrite. Discovers all viewable named channels and tracks access changes; Spot limits explicit subscriptions to 100 per connection."
         },
         "defaultTarget": {
           "label": "Default Chat Target",
