@@ -1,3 +1,4 @@
+import type { OpenClawConfig } from "openclaw/plugin-sdk/channel-core";
 import { describe, expect, it } from "vitest";
 
 import {
@@ -7,6 +8,11 @@ import {
   SPOT_MESSAGE_MAX_LENGTH,
   spotOutboundAdapter,
 } from "./outbound.js";
+import {
+  resolveSpotOutboundSessionRoute,
+  spotChannelPlugin,
+} from "./channel.js";
+import type { SpotClient } from "./client.js";
 
 describe("Spot target grammar", () => {
   it.each([
@@ -42,6 +48,81 @@ describe("Spot target grammar", () => {
       text: true,
       replyTo: false,
       thread: true,
+    });
+  });
+
+  it("uses group session identity for durable room threads", async () => {
+    expect(
+      spotChannelPlugin.messaging?.inferTargetChatType?.({
+        to: "thread:thread-1",
+      }),
+    ).toBe("group");
+    await expect(
+      spotChannelPlugin.messaging?.targetResolver?.resolveTarget?.({
+        cfg: {} as never,
+        input: "thread:thread-1",
+        normalized: "thread:thread-1",
+      }),
+    ).resolves.toMatchObject({
+      to: "thread:thread-1",
+      kind: "group",
+    });
+  });
+
+  it("canonicalizes DM and room aliases to the resolved thread session", async () => {
+    const cfg = {
+      channels: {
+        spot: {
+          token: "token",
+          worldId: "world-1",
+        },
+      },
+    } as OpenClawConfig;
+    const client = {
+      getOrCreateDm: async () => ({ id: "dm-thread" }),
+      getSpots: async () => [
+        {
+          id: "spot-lobby",
+          name: "Lobby",
+          slug: "lobby",
+          roomId: "floorplan-room",
+          threadId: "lobby-thread",
+          isDefault: true,
+          isMeetingRoom: false,
+          canAccess: true,
+        },
+      ],
+    } as unknown as SpotClient;
+    const dependencies = { createClient: () => client };
+
+    const dmRoute = await resolveSpotOutboundSessionRoute(
+      {
+        cfg,
+        agentId: "main",
+        accountId: "default",
+        target: "user:user-1",
+      },
+      dependencies,
+    );
+    expect(dmRoute).toMatchObject({
+      recipientSessionExact: true,
+      peer: { kind: "group", id: "dm-thread" },
+      chatType: "group",
+      to: "thread:dm-thread",
+    });
+
+    const roomRoute = await resolveSpotOutboundSessionRoute(
+      {
+        cfg,
+        agentId: "main",
+        accountId: "default",
+        target: "spot:lobby",
+      },
+      dependencies,
+    );
+    expect(roomRoute).toMatchObject({
+      peer: { kind: "group", id: "lobby-thread" },
+      to: "thread:lobby-thread",
     });
   });
 });

@@ -24,6 +24,53 @@ describe("SpotClient", () => {
     expect(url).toBe("http://127.0.0.1:3000/api/thread/thread%2Fone/events");
     expect(init?.headers).toMatchObject({ Authorization: "Bearer super-secret" });
     expect(init?.body).toBe(JSON.stringify({ message: "hello" }));
+    expect(init?.signal).toBeInstanceOf(AbortSignal);
+  });
+
+  it("combines caller cancellation with a finite request timeout", async () => {
+    const caller = new AbortController();
+    const fetch = vi.fn<typeof globalThis.fetch>().mockImplementation(
+      (_input, init) =>
+        new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener(
+            "abort",
+            () => reject(init.signal?.reason),
+            { once: true },
+          );
+        }),
+    );
+    const client = new SpotClient({
+      baseUrl: "https://spot.test",
+      token: "x",
+      fetch,
+      requestTimeoutMs: 1_000,
+    });
+
+    const request = client.getMe({ signal: caller.signal });
+    caller.abort(new Error("caller stopped"));
+    await expect(request).rejects.toThrow("caller stopped");
+    expect(fetch.mock.calls[0]?.[1]?.signal?.aborted).toBe(true);
+  });
+
+  it("times out stalled requests", async () => {
+    const fetch = vi.fn<typeof globalThis.fetch>().mockImplementation(
+      (_input, init) =>
+        new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener(
+            "abort",
+            () => reject(init.signal?.reason),
+            { once: true },
+          );
+        }),
+    );
+    const client = new SpotClient({
+      baseUrl: "https://spot.test",
+      token: "x",
+      fetch,
+      requestTimeoutMs: 10,
+    });
+
+    await expect(client.getMe()).rejects.toMatchObject({ name: "TimeoutError" });
   });
 
   it("normalizes room discovery and drops malformed entries", async () => {

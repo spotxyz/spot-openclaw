@@ -24,7 +24,16 @@ export interface SpotClientOptions {
   baseUrl: string;
   token: string;
   fetch?: typeof globalThis.fetch;
+  signal?: AbortSignal;
+  requestTimeoutMs?: number;
 }
+
+export interface SpotRequestOptions {
+  signal?: AbortSignal | undefined;
+  timeoutMs?: number;
+}
+
+export const DEFAULT_SPOT_REQUEST_TIMEOUT_MS = 15_000;
 
 const extractApiError = (
   value: unknown,
@@ -87,14 +96,25 @@ export class SpotClient {
   readonly baseUrl: string;
   private readonly token: string;
   private readonly fetchImpl: typeof globalThis.fetch;
+  private readonly signal: AbortSignal | undefined;
+  private readonly requestTimeoutMs: number;
 
   constructor(options: SpotClientOptions) {
     this.baseUrl = options.baseUrl.replace(/\/+$/, "");
     this.token = options.token;
     this.fetchImpl = options.fetch ?? globalThis.fetch;
+    this.signal = options.signal;
+    this.requestTimeoutMs =
+      options.requestTimeoutMs ?? DEFAULT_SPOT_REQUEST_TIMEOUT_MS;
     if (!this.baseUrl) throw new Error("Spot baseUrl is required.");
     if (!this.token) throw new Error("Spot token is required.");
     if (!this.fetchImpl) throw new Error("A fetch implementation is required.");
+    if (
+      !Number.isFinite(this.requestTimeoutMs) ||
+      this.requestTimeoutMs <= 0
+    ) {
+      throw new Error("Spot requestTimeoutMs must be a positive number.");
+    }
   }
 
   gatewayUrl(): string {
@@ -110,14 +130,19 @@ export class SpotClient {
     return { Authorization: `Bearer ${this.token}` };
   }
 
-  async getMe(): Promise<SpotMeResponse> {
-    return this.request("GET", "/api/me");
+  async getMe(options?: SpotRequestOptions): Promise<SpotMeResponse> {
+    return this.request("GET", "/api/me", undefined, options);
   }
 
-  async getSpots(worldId: string): Promise<SpotWorldSpot[]> {
+  async getSpots(
+    worldId: string,
+    options?: SpotRequestOptions,
+  ): Promise<SpotWorldSpot[]> {
     const result = await this.request<unknown>(
       "GET",
       `/api/world/${encodeURIComponent(worldId)}/spots`,
+      undefined,
+      options,
     );
     if (!Array.isArray(result)) {
       throw new SpotApiError(
@@ -132,105 +157,148 @@ export class SpotClient {
       .filter((spot): spot is SpotWorldSpot => !!spot);
   }
 
-  async getAvatarState(worldId: string): Promise<SpotAvatarState> {
+  async getAvatarState(
+    worldId: string,
+    options?: SpotRequestOptions,
+  ): Promise<SpotAvatarState> {
     return this.request(
       "GET",
       `/api/world/${encodeURIComponent(worldId)}/avatar`,
+      undefined,
+      options,
     );
   }
 
-  async getWorldAvatars(worldId: string): Promise<SpotWorldAvatar[]> {
+  async getWorldAvatars(
+    worldId: string,
+    options?: SpotRequestOptions,
+  ): Promise<SpotWorldAvatar[]> {
     return this.request(
       "GET",
       `/api/world/${encodeURIComponent(worldId)}/avatars`,
+      undefined,
+      options,
     );
   }
 
   async joinAvatar(
     worldId: string,
     input: SpotAvatarStartupConfig = {},
+    options?: SpotRequestOptions,
   ): Promise<SpotAvatarState> {
     const { joinOnStart: _joinOnStart, ...body } = input;
     return this.request(
       "POST",
       `/api/world/${encodeURIComponent(worldId)}/avatar/join`,
       body,
+      options,
     );
   }
 
   async moveAvatar(
     worldId: string,
     input: { x: number; z: number; facing?: number },
+    options?: SpotRequestOptions,
   ): Promise<SpotAvatarState> {
     return this.request(
       "POST",
       `/api/world/${encodeURIComponent(worldId)}/avatar/move`,
       input,
+      options,
     );
   }
 
   async teleportAvatar(
     worldId: string,
     input: { x: number; z: number; facing?: number },
+    options?: SpotRequestOptions,
   ): Promise<SpotAvatarState> {
     return this.request(
       "POST",
       `/api/world/${encodeURIComponent(worldId)}/avatar/teleport`,
       input,
+      options,
     );
   }
 
   async setAvatarFacing(
     worldId: string,
     facing: number,
+    options?: SpotRequestOptions,
   ): Promise<SpotAvatarState> {
     return this.request(
       "PUT",
       `/api/world/${encodeURIComponent(worldId)}/avatar/facing`,
       { facing },
+      options,
     );
   }
 
   async emote(
     worldId: string,
     input: { emojiName?: string; animationName?: string },
+    options?: SpotRequestOptions,
   ): Promise<SpotAvatarState> {
     return this.request(
       "POST",
       `/api/world/${encodeURIComponent(worldId)}/avatar/emote`,
       input,
+      options,
     );
   }
 
-  async leaveAvatar(worldId: string): Promise<void> {
+  async leaveAvatar(
+    worldId: string,
+    options?: SpotRequestOptions,
+  ): Promise<void> {
     await this.request(
       "POST",
       `/api/world/${encodeURIComponent(worldId)}/avatar/leave`,
+      undefined,
+      options,
     );
   }
 
   async sendThreadMessage(
     threadId: string,
     message: string,
+    options?: SpotRequestOptions,
   ): Promise<SpotCreatedMessage> {
     return this.request(
       "POST",
       `/api/thread/${encodeURIComponent(threadId)}/events`,
       { message },
+      options,
     );
   }
 
-  async getOrCreateDm(userId: string): Promise<{ id: string }> {
-    return this.request("POST", "/api/dm", { userIds: [userId] });
+  async getOrCreateDm(
+    userId: string,
+    options?: SpotRequestOptions,
+  ): Promise<{ id: string }> {
+    return this.request("POST", "/api/dm", { userIds: [userId] }, options);
   }
 
   private async request<T>(
     method: string,
     path: string,
     body?: unknown,
+    options: SpotRequestOptions = {},
   ): Promise<T> {
+    const timeoutMs = options.timeoutMs ?? this.requestTimeoutMs;
+    if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+      throw new Error("Spot request timeout must be a positive number.");
+    }
+    const signals = [
+      this.signal,
+      options.signal,
+      AbortSignal.timeout(timeoutMs),
+    ].filter((signal): signal is AbortSignal => !!signal);
+    const signal =
+      signals.length === 1 ? signals[0]! : AbortSignal.any(signals);
     const response = await this.fetchImpl(`${this.baseUrl}${path}`, {
       method,
+      signal,
       headers: {
         ...this.authorizationHeaders(),
         Accept: "application/json",

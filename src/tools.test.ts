@@ -2,6 +2,10 @@ import type { OpenClawConfig } from "openclaw/plugin-sdk/core";
 import { describe, expect, it, vi } from "vitest";
 
 import type { SpotClient } from "./client.js";
+import {
+  isManagedAvatarLeaseSuppressed,
+  resumeManagedAvatarLease,
+} from "./avatar-lease-state.js";
 import { createSpotTools } from "./tools.js";
 
 const cfg = {
@@ -54,9 +58,18 @@ describe("Spot avatar tools", () => {
       { createClient: () => client },
     );
     const tool = tools.find((candidate) => candidate.name === "spot_move_to_room")!;
+    const abortController = new AbortController();
 
-    const result = await tool.execute("call-1", { room: "LOBBY" });
-    expect(joinAvatar).toHaveBeenCalledWith("world-1", { spotId: "spot-lobby" });
+    const result = await tool.execute(
+      "call-1",
+      { room: "LOBBY" },
+      abortController.signal,
+    );
+    expect(joinAvatar).toHaveBeenCalledWith(
+      "world-1",
+      { spotId: "spot-lobby" },
+      { signal: abortController.signal },
+    );
     expect(result.details).toMatchObject({
       ok: true,
       worldId: "world-1",
@@ -93,9 +106,61 @@ describe("Spot avatar tools", () => {
       { createClient: () => client },
     );
     const tool = tools.find((candidate) => candidate.name === "spot_observe")!;
+    const abortController = new AbortController();
 
-    const result = await tool.execute("call-3", {});
-    expect(client.getAvatarState).toHaveBeenCalledWith("world-1");
+    const result = await tool.execute("call-3", {}, abortController.signal);
+    expect(client.getAvatarState).toHaveBeenCalledWith("world-1", {
+      signal: abortController.signal,
+    });
     expect(result.details).toMatchObject({ ok: true, worldId: "world-1" });
+  });
+
+  it("keeps an explicit leave suppressed until an explicit join", async () => {
+    const client = {
+      leaveAvatar: vi.fn().mockResolvedValue(undefined),
+      joinAvatar: vi.fn().mockResolvedValue({ joined: true }),
+    } as unknown as SpotClient;
+    const tools = createSpotTools(
+      { getConfig: () => cfg },
+      { createClient: () => client },
+    );
+    const leave = tools.find((candidate) => candidate.name === "spot_leave")!;
+    const join = tools.find((candidate) => candidate.name === "spot_join")!;
+    const abortController = new AbortController();
+
+    await leave.execute("call-leave", {}, abortController.signal);
+    expect(isManagedAvatarLeaseSuppressed("default", "world-1")).toBe(true);
+    expect(client.leaveAvatar).toHaveBeenCalledWith("world-1", {
+      signal: abortController.signal,
+    });
+
+    await join.execute("call-join", {}, abortController.signal);
+    expect(isManagedAvatarLeaseSuppressed("default", "world-1")).toBe(false);
+    expect(client.joinAvatar).toHaveBeenCalledWith(
+      "world-1",
+      {},
+      { signal: abortController.signal },
+    );
+  });
+
+  it("does not resume a managed lease when an explicit join fails", async () => {
+    const client = {
+      leaveAvatar: vi.fn().mockResolvedValue(undefined),
+      joinAvatar: vi.fn().mockRejectedValue(new Error("join rejected")),
+    } as unknown as SpotClient;
+    const tools = createSpotTools(
+      { getConfig: () => cfg },
+      { createClient: () => client },
+    );
+    const leave = tools.find((candidate) => candidate.name === "spot_leave")!;
+    const join = tools.find((candidate) => candidate.name === "spot_join")!;
+
+    await leave.execute("call-leave-failed-join", {});
+    await expect(join.execute("call-failed-join", {})).rejects.toThrow(
+      /join rejected/,
+    );
+    expect(isManagedAvatarLeaseSuppressed("default", "world-1")).toBe(true);
+
+    resumeManagedAvatarLease("default", "world-1");
   });
 });

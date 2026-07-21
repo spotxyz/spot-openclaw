@@ -3,17 +3,27 @@ import { describe, expect, it, vi } from "vitest";
 
 import {
   avatarLeaseRenewalIntervalMs,
+  BoundedKeyedTaskQueue,
   DEFAULT_SPOT_AVATAR_TTL_SECONDS,
   dispatchSpotMessage,
   reconnectDelayMs,
   resolveAvatarLeaseTtlSeconds,
   runManagedAvatarLease,
   selectGatewayHealthIssue,
-  SerialTaskQueue,
+  shouldAcceptSpotEventFrame,
   shouldActivateSpotMessage,
+  SpotHelloEventBuffer,
 } from "./gateway.js";
 import type { SpotClient } from "./client.js";
-import type { ResolvedSpotAccount, SpotMessageEvent } from "./types.js";
+import {
+  resumeManagedAvatarLease,
+  suppressManagedAvatarLease,
+} from "./avatar-lease-state.js";
+import type {
+  ResolvedSpotAccount,
+  SpotEventFrame,
+  SpotMessageEvent,
+} from "./types.js";
 
 const account = (
   patch: Partial<ResolvedSpotAccount> = {},
@@ -135,25 +145,102 @@ describe("Spot Agent Gateway policy", () => {
     ).toBe(false);
   });
 
-  it("processes queued events serially and continues after an error", async () => {
+  it("serializes each thread, runs different threads concurrently, and bounds backlog", async () => {
     const errors: unknown[] = [];
     const order: string[] = [];
-    const queue = new SerialTaskQueue((error) => errors.push(error));
-    queue.enqueue(async () => {
-      await Promise.resolve();
-      order.push("first");
+    let releaseFirst!: () => void;
+    let releaseOther!: () => void;
+    const first = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
     });
-    queue.enqueue(async () => {
+    const other = new Promise<void>((resolve) => {
+      releaseOther = resolve;
+    });
+    const queue = new BoundedKeyedTaskQueue({
+      concurrency: 2,
+      capacity: 3,
+      onError: (error) => errors.push(error),
+    });
+    expect(queue.enqueue("thread-1", async () => {
+      order.push("first:start");
+      await first;
+      order.push("first:end");
+    })).toBe(true);
+    expect(queue.enqueue("thread-1", async () => {
       order.push("second");
       throw new Error("expected");
-    });
-    queue.enqueue(async () => {
-      order.push("third");
-    });
+    })).toBe(true);
+    expect(queue.enqueue("thread-2", async () => {
+      order.push("other:start");
+      await other;
+      order.push("other:end");
+    })).toBe(true);
+    expect(queue.enqueue("thread-3", async () => undefined)).toBe(false);
+
+    await vi.waitFor(() =>
+      expect(order).toEqual(["first:start", "other:start"]),
+    );
+    releaseOther();
+    await vi.waitFor(() => expect(order).toContain("other:end"));
+    releaseFirst();
 
     await queue.drain();
-    expect(order).toEqual(["first", "second", "third"]);
+    expect(order).toEqual([
+      "first:start",
+      "other:start",
+      "other:end",
+      "first:end",
+      "second",
+    ]);
     expect(errors).toHaveLength(1);
+  });
+
+  it("filters gateway events to a configured organization", () => {
+    const frame = {
+      op: "event" as const,
+      seq: 1,
+      type: "message.created",
+      ts: "2026-07-20T12:00:00.000Z",
+      orgId: "org-1",
+      payload: {},
+    };
+    expect(shouldAcceptSpotEventFrame(account(), frame)).toBe(true);
+    expect(
+      shouldAcceptSpotEventFrame(account({ orgId: "org-1" }), frame),
+    ).toBe(true);
+    expect(
+      shouldAcceptSpotEventFrame(account({ orgId: "org-2" }), frame),
+    ).toBe(false);
+    expect(
+      shouldAcceptSpotEventFrame(account({ orgId: "org-2" }), {
+        ...frame,
+        orgId: null,
+      }),
+    ).toBe(true);
+  });
+
+  it("buffers events until hello establishes the self identity", () => {
+    const buffer = new SpotHelloEventBuffer(2);
+    const consumed: number[] = [];
+    const consume = (frame: SpotEventFrame) => consumed.push(frame.seq);
+    const frame = (seq: number): SpotEventFrame => ({
+      op: "event",
+      seq,
+      type: "message.created",
+      ts: "2026-07-20T12:00:00.000Z",
+      orgId: "org-1",
+      payload: {},
+    });
+
+    expect(buffer.push(frame(1), consume)).toBe(true);
+    expect(buffer.push(frame(2), consume)).toBe(true);
+    expect(buffer.push(frame(3), consume)).toBe(false);
+    expect(consumed).toEqual([]);
+
+    buffer.open(consume);
+    expect(consumed).toEqual([1, 2]);
+    expect(buffer.push(frame(4), consume)).toBe(true);
+    expect(consumed).toEqual([1, 2, 4]);
   });
 
   it("caps exponential reconnect delay and applies bounded jitter", () => {
@@ -194,24 +281,78 @@ describe("Spot Agent Gateway policy", () => {
       reply: { dispatchReplyWithBufferedBlockDispatcher: vi.fn() },
     } as unknown as PluginRuntime["channel"];
     const client = { sendThreadMessage } as unknown as SpotClient;
+    const abortController = new AbortController();
 
     await dispatchSpotMessage({
       cfg: {} as OpenClawConfig,
       account: account(),
       runtime,
       client,
-      event: event({ isMentioned: true }),
+      event: event({ isDirectMessage: true }),
+      signal: abortController.signal,
     });
 
     expect(sendThreadMessage).toHaveBeenCalledTimes(2);
     const chunks = sendThreadMessage.mock.calls.map((call) => call[1] as string);
     expect(chunks.every((chunk) => chunk.length <= 12_000)).toBe(true);
     expect(chunks.join("")).toBe(replyText);
+    expect(runtime.routing.resolveAgentRoute).toHaveBeenCalledWith(
+      expect.objectContaining({ peer: { kind: "group", id: "thread-1" } }),
+    );
+    expect(buildContext).toHaveBeenCalledWith(
+      expect.objectContaining({
+        conversation: expect.objectContaining({
+          kind: "direct",
+          routePeer: { kind: "group", id: "thread-1" },
+        }),
+      }),
+    );
+    expect(buildContext).toHaveBeenCalledWith(
+      expect.objectContaining({ access: expect.objectContaining({ commands: { authorized: true } }) }),
+    );
+    expect(dispatchReply).toHaveBeenCalledWith(
+      expect.objectContaining({
+        replyOptions: { abortSignal: abortController.signal },
+      }),
+    );
+    expect(sendThreadMessage).toHaveBeenCalledWith(
+      "thread-1",
+      expect.any(String),
+      { signal: abortController.signal },
+    );
     expect(dispatchReply).toHaveBeenCalledOnce();
   });
 });
 
 describe("managed Spot avatar lease", () => {
+  it("does not rejoin while suppressed and wakes immediately after resume", async () => {
+    const abortController = new AbortController();
+    const controlled = createControlledDelay();
+    const getAvatarState = vi.fn().mockResolvedValue({ joined: true });
+    const joinAvatar = vi.fn().mockResolvedValue({ joined: true });
+    const accountId = "lease-suppressed";
+
+    const lease = runManagedAvatarLease({
+      client: { getAvatarState, joinAvatar },
+      accountId,
+      worldId: "world-1",
+      avatar: { joinOnStart: true, ttlSeconds: 30 },
+      signal: abortController.signal,
+      delay: controlled.delay,
+    });
+
+    await vi.waitFor(() => expect(joinAvatar).toHaveBeenCalledOnce());
+    await suppressManagedAvatarLease(accountId, "world-1");
+    await vi.waitFor(() => expect(controlled.pendingCount()).toBe(0));
+    expect(joinAvatar).toHaveBeenCalledOnce();
+
+    resumeManagedAvatarLease(accountId, "world-1");
+    await vi.waitFor(() => expect(joinAvatar).toHaveBeenCalledTimes(2));
+
+    abortController.abort();
+    await lease;
+  });
+
   it("preserves an existing avatar across connection initialization and reconnect", async () => {
     const abortController = new AbortController();
     const controlled = createControlledDelay();
@@ -225,6 +366,7 @@ describe("managed Spot avatar lease", () => {
 
     const lease = runManagedAvatarLease({
       client: { getAvatarState, joinAvatar },
+      accountId: "lease-preserve",
       worldId: "world-1",
       avatar: {
         joinOnStart: true,
@@ -236,13 +378,15 @@ describe("managed Spot avatar lease", () => {
     });
 
     await vi.waitFor(() => expect(joinAvatar).toHaveBeenCalledOnce());
-    expect(getAvatarState).toHaveBeenCalledWith("world-1");
+    expect(getAvatarState).toHaveBeenCalledWith("world-1", {
+      signal: abortController.signal,
+    });
     expect(joinAvatar).toHaveBeenCalledWith("world-1", {
       ttlSeconds: DEFAULT_SPOT_AVATAR_TTL_SECONDS,
-    });
+    }, { signal: abortController.signal });
     expect(controlled.delay).toHaveBeenCalledWith(
       300_000,
-      abortController.signal,
+      expect.any(AbortSignal),
     );
 
     abortController.abort();
@@ -254,6 +398,7 @@ describe("managed Spot avatar lease", () => {
     const reconnectDelay = createControlledDelay();
     const reconnectedLease = runManagedAvatarLease({
       client: { getAvatarState, joinAvatar },
+      accountId: "lease-preserve",
       worldId: "world-1",
       avatar: {
         joinOnStart: true,
@@ -267,7 +412,7 @@ describe("managed Spot avatar lease", () => {
     await vi.waitFor(() => expect(joinAvatar).toHaveBeenCalledTimes(2));
     expect(joinAvatar).toHaveBeenNthCalledWith(2, "world-1", {
       ttlSeconds: DEFAULT_SPOT_AVATAR_TTL_SECONDS,
-    });
+    }, { signal: reconnectAbortController.signal });
     reconnectAbortController.abort();
     await reconnectedLease;
   });
@@ -280,6 +425,7 @@ describe("managed Spot avatar lease", () => {
 
     const lease = runManagedAvatarLease({
       client: { getAvatarState, joinAvatar },
+      accountId: "lease-startup",
       worldId: "world-1",
       avatar: {
         joinOnStart: true,
@@ -298,10 +444,10 @@ describe("managed Spot avatar lease", () => {
       position: { x: 1, z: 2 },
       facing: 0.75,
       ttlSeconds: 30,
-    });
+    }, { signal: abortController.signal });
     expect(controlled.delay).toHaveBeenCalledWith(
       15_000,
-      abortController.signal,
+      expect.any(AbortSignal),
     );
 
     abortController.abort();
@@ -325,6 +471,7 @@ describe("managed Spot avatar lease", () => {
         getAvatarState: vi.fn().mockResolvedValue({ joined: true }),
         joinAvatar,
       },
+      accountId: "lease-recovery",
       worldId: "world-1",
       avatar: { joinOnStart: true, ttlSeconds: 60 },
       signal: abortController.signal,
@@ -374,6 +521,7 @@ describe("managed Spot avatar lease", () => {
 
     const lease = runManagedAvatarLease({
       client: { getAvatarState, joinAvatar },
+      accountId: "lease-expiry",
       worldId: "world-1",
       avatar: {
         joinOnStart: true,
@@ -388,14 +536,14 @@ describe("managed Spot avatar lease", () => {
     await vi.waitFor(() => expect(controlled.pendingCount()).toBe(1));
     expect(joinAvatar).toHaveBeenNthCalledWith(1, "world-1", {
       ttlSeconds: 60,
-    });
+    }, { signal: abortController.signal });
     controlled.releaseNext();
     await vi.waitFor(() => expect(joinAvatar).toHaveBeenCalledTimes(2));
     expect(joinAvatar).toHaveBeenNthCalledWith(2, "world-1", {
       spotId: "event-room",
       position: { x: 1, z: 2 },
       ttlSeconds: 60,
-    });
+    }, { signal: abortController.signal });
 
     abortController.abort();
     await lease;
@@ -412,6 +560,7 @@ describe("managed Spot avatar lease", () => {
 
     const lease = runManagedAvatarLease({
       client: { getAvatarState, joinAvatar },
+      accountId: "lease-retry",
       worldId: "world-1",
       avatar: { joinOnStart: true, spotId: "event-room" },
       signal: abortController.signal,
@@ -421,14 +570,14 @@ describe("managed Spot avatar lease", () => {
     await vi.waitFor(() => expect(controlled.delay).toHaveBeenCalledOnce());
     expect(controlled.delay).toHaveBeenCalledWith(
       30_000,
-      abortController.signal,
+      expect.any(AbortSignal),
     );
     controlled.releaseNext();
     await vi.waitFor(() => expect(joinAvatar).toHaveBeenCalledOnce());
     expect(joinAvatar).toHaveBeenCalledWith("world-1", {
       spotId: "event-room",
       ttlSeconds: DEFAULT_SPOT_AVATAR_TTL_SECONDS,
-    });
+    }, { signal: abortController.signal });
 
     abortController.abort();
     await lease;

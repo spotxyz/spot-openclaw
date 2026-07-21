@@ -25,6 +25,39 @@ type MutableConfig = OpenClawConfig & {
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   !!value && typeof value === "object" && !Array.isArray(value);
 
+const isLoopbackHostname = (hostname: string): boolean => {
+  const normalized = hostname.toLowerCase();
+  return (
+    normalized === "localhost" ||
+    normalized.endsWith(".localhost") ||
+    normalized === "[::1]" ||
+    /^127(?:\.\d{1,3}){3}$/.test(normalized)
+  );
+};
+
+export const validateSpotBaseUrl = (raw: string): string | undefined => {
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    return "Spot baseUrl must be a valid URL.";
+  }
+  if (url.protocol !== "http:" && url.protocol !== "https:") {
+    return "Spot baseUrl must use http or https.";
+  }
+  if (url.protocol === "http:" && !isLoopbackHostname(url.hostname)) {
+    return "Spot baseUrl must use https unless it points to a loopback development server.";
+  }
+  return undefined;
+};
+
+const normalizeSpotBaseUrl = (raw: string): string => {
+  const value = raw.trim();
+  const issue = validateSpotBaseUrl(value);
+  if (issue) throw new Error(issue);
+  return value.replace(/\/+$/, "");
+};
+
 export const getSpotChannelConfig = (
   cfg: OpenClawConfig,
 ): SpotChannelConfig => {
@@ -76,6 +109,11 @@ export const resolveSpotAccount = (
   if (!token) {
     throw new Error(`Spot account ${accountId} is missing its API token.`);
   }
+  if (config.avatar?.joinOnStart && !config.worldId) {
+    throw new Error(
+      `Spot account ${accountId} enables avatar.joinOnStart but has no worldId.`,
+    );
+  }
   const {
     token: _token,
     enabled,
@@ -91,7 +129,7 @@ export const resolveSpotAccount = (
     ...rest,
     accountId,
     enabled: enabled !== false,
-    baseUrl: (baseUrl || DEFAULT_SPOT_BASE_URL).replace(/\/+$/, ""),
+    baseUrl: normalizeSpotBaseUrl(baseUrl || DEFAULT_SPOT_BASE_URL),
     token,
     activationMode: activationMode ?? "direct-or-mention",
     allowFrom: allowFrom ?? [],

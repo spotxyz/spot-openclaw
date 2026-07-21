@@ -5,6 +5,10 @@ import {
 } from "openclaw/plugin-sdk/core";
 import { Type } from "typebox";
 
+import {
+  resumeManagedAvatarLease,
+  suppressManagedAvatarLease,
+} from "./avatar-lease-state.js";
 import { SpotApiError, SpotClient } from "./client.js";
 import { resolveSpotAccount } from "./config.js";
 import type { ResolvedSpotAccount, SpotWorldSpot } from "./types.js";
@@ -154,13 +158,13 @@ export const createSpotTools = (
     description:
       "Inspect the managed avatar, visible avatars, and available rooms in a Spot world before deciding how to act.",
     parameters: Type.Object(commonProperties, { additionalProperties: false }),
-    async execute(_toolCallId, rawParams) {
+    async execute(_toolCallId, rawParams, signal) {
       const params = rawParams as ToolParams;
       const { client, worldId } = resolveExecution(context, dependencies, params);
       const [avatar, avatars, rooms] = await Promise.all([
-        client.getAvatarState(worldId),
-        client.getWorldAvatars(worldId),
-        client.getSpots(worldId),
+        client.getAvatarState(worldId, { signal }),
+        client.getWorldAvatars(worldId, { signal }),
+        client.getSpots(worldId, { signal }),
       ]);
       return jsonResult({ ok: true, worldId, avatar, avatars, rooms });
     },
@@ -170,10 +174,10 @@ export const createSpotTools = (
     label: "Get Spot avatar state",
     description: "Get the managed avatar's current join, room, position, and facing state.",
     parameters: Type.Object(commonProperties, { additionalProperties: false }),
-    async execute(_toolCallId, rawParams) {
+    async execute(_toolCallId, rawParams, signal) {
       const params = rawParams as ToolParams;
       const { client, worldId } = resolveExecution(context, dependencies, params);
-      const avatar = await client.getAvatarState(worldId);
+      const avatar = await client.getAvatarState(worldId, { signal });
       return jsonResult({ ok: true, worldId, avatar });
     },
   }),
@@ -183,10 +187,10 @@ export const createSpotTools = (
     description:
       "List rooms/spots in the configured world, including their chat thread ids and access decisions.",
     parameters: Type.Object(commonProperties, { additionalProperties: false }),
-    async execute(_toolCallId, rawParams) {
+    async execute(_toolCallId, rawParams, signal) {
       const params = rawParams as ToolParams;
       const { client, worldId } = resolveExecution(context, dependencies, params);
-      const rooms = await client.getSpots(worldId);
+      const rooms = await client.getSpots(worldId, { signal });
       return jsonResult({ ok: true, worldId, rooms });
     },
   }),
@@ -212,9 +216,13 @@ export const createSpotTools = (
       },
       { additionalProperties: false },
     ),
-    async execute(_toolCallId, rawParams) {
+    async execute(_toolCallId, rawParams, signal) {
       const params = rawParams as ToolParams;
-      const { client, worldId } = resolveExecution(context, dependencies, params);
+      const { account, client, worldId } = resolveExecution(
+        context,
+        dependencies,
+        params,
+      );
       const spotId = readString(params, "spotId");
       const x = readNumber(params, "x");
       const z = readNumber(params, "z");
@@ -223,12 +231,17 @@ export const createSpotTools = (
       }
       const facing = readNumber(params, "facing");
       const ttlSeconds = readNumber(params, "ttlSeconds");
-      const avatar = await client.joinAvatar(worldId, {
-        ...(spotId ? { spotId } : {}),
-        ...(x === undefined || z === undefined ? {} : { position: { x, z } }),
-        ...(facing === undefined ? {} : { facing }),
-        ...(ttlSeconds === undefined ? {} : { ttlSeconds }),
-      });
+      const avatar = await client.joinAvatar(
+        worldId,
+        {
+          ...(spotId ? { spotId } : {}),
+          ...(x === undefined || z === undefined ? {} : { position: { x, z } }),
+          ...(facing === undefined ? {} : { facing }),
+          ...(ttlSeconds === undefined ? {} : { ttlSeconds }),
+        },
+        { signal },
+      );
+      resumeManagedAvatarLease(account.accountId, worldId);
       return jsonResult({ ok: true, worldId, avatar });
     },
   }),
@@ -237,10 +250,15 @@ export const createSpotTools = (
     label: "Leave Spot world",
     description: "Remove the managed avatar from the Spot world.",
     parameters: Type.Object(commonProperties, { additionalProperties: false }),
-    async execute(_toolCallId, rawParams) {
+    async execute(_toolCallId, rawParams, signal) {
       const params = rawParams as ToolParams;
-      const { client, worldId } = resolveExecution(context, dependencies, params);
-      await client.leaveAvatar(worldId);
+      const { account, client, worldId } = resolveExecution(
+        context,
+        dependencies,
+        params,
+      );
+      await suppressManagedAvatarLease(account.accountId, worldId, signal);
+      await client.leaveAvatar(worldId, { signal });
       return jsonResult({ ok: true, worldId, avatar: { joined: false } });
     },
   }),
@@ -258,17 +276,21 @@ export const createSpotTools = (
       },
       { additionalProperties: false },
     ),
-    async execute(_toolCallId, rawParams) {
+    async execute(_toolCallId, rawParams, signal) {
       const params = rawParams as ToolParams;
       const { client, worldId } = resolveExecution(context, dependencies, params);
       const x = readNumber(params, "x", { required: true })!;
       const z = readNumber(params, "z", { required: true })!;
       const facing = readNumber(params, "facing");
-      const avatar = await client.moveAvatar(worldId, {
-        x,
-        z,
-        ...(facing === undefined ? {} : { facing }),
-      });
+      const avatar = await client.moveAvatar(
+        worldId,
+        {
+          x,
+          z,
+          ...(facing === undefined ? {} : { facing }),
+        },
+        { signal },
+      );
       return jsonResult({ ok: true, worldId, avatar });
     },
   }),
@@ -286,17 +308,21 @@ export const createSpotTools = (
       },
       { additionalProperties: false },
     ),
-    async execute(_toolCallId, rawParams) {
+    async execute(_toolCallId, rawParams, signal) {
       const params = rawParams as ToolParams;
       const { client, worldId } = resolveExecution(context, dependencies, params);
       const x = readNumber(params, "x", { required: true })!;
       const z = readNumber(params, "z", { required: true })!;
       const facing = readNumber(params, "facing");
-      const avatar = await client.teleportAvatar(worldId, {
-        x,
-        z,
-        ...(facing === undefined ? {} : { facing }),
-      });
+      const avatar = await client.teleportAvatar(
+        worldId,
+        {
+          x,
+          z,
+          ...(facing === undefined ? {} : { facing }),
+        },
+        { signal },
+      );
       return jsonResult({ ok: true, worldId, avatar });
     },
   }),
@@ -316,11 +342,15 @@ export const createSpotTools = (
       },
       { additionalProperties: false },
     ),
-    async execute(_toolCallId, rawParams) {
+    async execute(_toolCallId, rawParams, signal) {
       const params = rawParams as ToolParams;
-      const { client, worldId } = resolveExecution(context, dependencies, params);
+      const { account, client, worldId } = resolveExecution(
+        context,
+        dependencies,
+        params,
+      );
       const selector = readString(params, "room", { required: true })!;
-      const rooms = await client.getSpots(worldId);
+      const rooms = await client.getSpots(worldId, { signal });
       const room = rooms.find((candidate) => roomMatches(candidate, selector));
       if (!room) {
         throw new Error(`Spot room ${selector} was not found in world ${worldId}.`);
@@ -332,11 +362,16 @@ export const createSpotTools = (
       }
       const facing = readNumber(params, "facing");
       const ttlSeconds = readNumber(params, "ttlSeconds");
-      const avatar = await client.joinAvatar(worldId, {
-        spotId: room.id,
-        ...(facing === undefined ? {} : { facing }),
-        ...(ttlSeconds === undefined ? {} : { ttlSeconds }),
-      });
+      const avatar = await client.joinAvatar(
+        worldId,
+        {
+          spotId: room.id,
+          ...(facing === undefined ? {} : { facing }),
+          ...(ttlSeconds === undefined ? {} : { ttlSeconds }),
+        },
+        { signal },
+      );
+      resumeManagedAvatarLease(account.accountId, worldId);
       return jsonResult({ ok: true, worldId, room, avatar });
     },
   }),
@@ -355,11 +390,11 @@ export const createSpotTools = (
       },
       { additionalProperties: false },
     ),
-    async execute(_toolCallId, rawParams) {
+    async execute(_toolCallId, rawParams, signal) {
       const params = rawParams as ToolParams;
       const { client, worldId } = resolveExecution(context, dependencies, params);
       const facing = readNumber(params, "facing", { required: true })!;
-      const avatar = await client.setAvatarFacing(worldId, facing);
+      const avatar = await client.setAvatarFacing(worldId, facing, { signal });
       return jsonResult({ ok: true, worldId, avatar });
     },
   }),
@@ -378,7 +413,7 @@ export const createSpotTools = (
       },
       { additionalProperties: false },
     ),
-    async execute(_toolCallId, rawParams) {
+    async execute(_toolCallId, rawParams, signal) {
       const params = rawParams as ToolParams;
       const { client, worldId } = resolveExecution(context, dependencies, params);
       const emojiName = readString(params, "emojiName");
@@ -386,10 +421,14 @@ export const createSpotTools = (
       if (!emojiName && !animationName) {
         throw new Error("emojiName or animationName is required.");
       }
-      const avatar = await client.emote(worldId, {
-        ...(emojiName ? { emojiName } : {}),
-        ...(animationName ? { animationName } : {}),
-      });
+      const avatar = await client.emote(
+        worldId,
+        {
+          ...(emojiName ? { emojiName } : {}),
+          ...(animationName ? { animationName } : {}),
+        },
+        { signal },
+      );
       return jsonResult({ ok: true, worldId, avatar });
     },
   }),

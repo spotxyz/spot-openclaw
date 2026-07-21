@@ -12,6 +12,30 @@ const config = (spot: Record<string, unknown>): OpenClawConfig =>
   ({ channels: { spot } }) as OpenClawConfig;
 
 describe("Spot account config", () => {
+  it("uses the hosted Spot API origin by default", () => {
+    expect(resolveSpotAccount(config({ token: "resolved-token" })).baseUrl).toBe(
+      "https://spotvirtual.com",
+    );
+  });
+
+  it("requires TLS except for loopback development servers", () => {
+    expect(() =>
+      resolveSpotAccount(
+        config({ token: "resolved-token", baseUrl: "http://spot.example.com" }),
+      ),
+    ).toThrow(/https.*loopback/i);
+    expect(
+      resolveSpotAccount(
+        config({ token: "resolved-token", baseUrl: "http://localhost:3210/" }),
+      ).baseUrl,
+    ).toBe("http://localhost:3210");
+    expect(
+      resolveSpotAccount(
+        config({ token: "resolved-token", baseUrl: "http://127.0.0.1:3210" }),
+      ).baseUrl,
+    ).toBe("http://127.0.0.1:3210");
+  });
+
   it("resolves root defaults and applies secure runtime token strings", () => {
     const cfg = config({
       baseUrl: "https://spot.test/",
@@ -56,6 +80,14 @@ describe("Spot account config", () => {
       token: { source: "env", provider: "default", id: "SPOT_AGENT_TOKEN" },
     });
     expect(() => resolveSpotAccount(cfg)).toThrow(/SecretRef|resolved|token/i);
+  });
+
+  it("rejects managed-avatar startup without a world", () => {
+    expect(() =>
+      resolveSpotAccount(
+        config({ token: "resolved-token", avatar: { joinOnStart: true } }),
+      ),
+    ).toThrow(/joinOnStart.*worldId/);
   });
 
   it("writes setup input into the default channel account", () => {

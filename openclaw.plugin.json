@@ -310,11 +310,11 @@
         },
         "baseUrl": {
           "label": "Spot Base URL",
-          "placeholder": "https://spot.xyz"
+          "placeholder": "https://spotvirtual.com"
         },
         "token": {
           "label": "Spot API Token",
-          "help": "Bearer token with EventRead, EventWrite, WorldRead, AvatarWrite, and optionally ThreadWrite for initiated DMs.",
+          "help": "Bearer token with EventRead, EventWrite, WorldRead, AvatarWrite, and optionally ThreadWrite for initiated DMs. Token scopes do not replace the bot user's Spot role permissions.",
           "sensitive": true
         },
         "worldId": {

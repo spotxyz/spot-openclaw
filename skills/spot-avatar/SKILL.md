@@ -22,7 +22,7 @@ Use this skill when the user asks you to join, observe, move around, emote, or s
 3. Prefer `spot_move_to_room` for a named room. It discovers the room and joins/repositions by spot id without guessing coordinates.
 4. Use `spot_move` for normal coordinate movement and `spot_teleport` only when exact repositioning is explicitly appropriate.
 5. Use `spot_face` to turn and `spot_emote` for a visible emoji or animation.
-6. Call `spot_leave` only when the user asks to leave or the task clearly requires ending presence.
+6. Call `spot_leave` only when the user asks to leave or the task clearly requires ending presence. It pauses managed-avatar renewal until `spot_join` or `spot_move_to_room` is called explicitly.
 
 ## Speaking and messaging
 

@@ -5,6 +5,12 @@ import type {
 import type { PluginRuntime } from "openclaw/plugin-sdk/core";
 import WebSocket, { type ClientOptions, type RawData } from "ws";
 
+import {
+  beginManagedAvatarLeaseAttempt,
+  getManagedAvatarLeaseRevision,
+  isManagedAvatarLeaseSuppressed,
+  subscribeManagedAvatarLeaseChange,
+} from "./avatar-lease-state.js";
 import { SpotClient } from "./client.js";
 import { chunkSpotText } from "./outbound.js";
 import { formatMissingSpotScopes, SPOT_SCOPE } from "./scopes.js";
@@ -36,6 +42,35 @@ export const DEFAULT_SPOT_AVATAR_TTL_SECONDS = 600;
 export const MIN_SPOT_AVATAR_TTL_SECONDS = 30;
 export const MAX_SPOT_AVATAR_TTL_SECONDS = 3_600;
 export const MAX_SPOT_AVATAR_RETRY_DELAY_MS = 30_000;
+export const MAX_SPOT_INBOUND_CONCURRENCY = 4;
+export const MAX_SPOT_INBOUND_BACKLOG = 256;
+
+export class SpotHelloEventBuffer {
+  private readonly frames: SpotEventFrame[] = [];
+  private opened = false;
+
+  constructor(private readonly capacity = MAX_SPOT_INBOUND_BACKLOG) {
+    if (!Number.isInteger(capacity) || capacity < 1) {
+      throw new Error("Spot hello event buffer capacity must be a positive integer.");
+    }
+  }
+
+  push(frame: SpotEventFrame, consume: (frame: SpotEventFrame) => void): boolean {
+    if (this.opened) {
+      consume(frame);
+      return true;
+    }
+    if (this.frames.length >= this.capacity) return false;
+    this.frames.push(frame);
+    return true;
+  }
+
+  open(consume: (frame: SpotEventFrame) => void): void {
+    if (this.opened) return;
+    this.opened = true;
+    for (const frame of this.frames.splice(0)) consume(frame);
+  }
+}
 
 export const resolveAvatarLeaseTtlSeconds = (ttlSeconds?: number): number => {
   const resolved = ttlSeconds ?? DEFAULT_SPOT_AVATAR_TTL_SECONDS;
@@ -49,19 +84,104 @@ export const resolveAvatarLeaseTtlSeconds = (ttlSeconds?: number): number => {
 export const avatarLeaseRenewalIntervalMs = (ttlSeconds?: number): number =>
   resolveAvatarLeaseTtlSeconds(ttlSeconds) * 500;
 
-export class SerialTaskQueue {
-  private tail: Promise<void> = Promise.resolve();
+export class BoundedKeyedTaskQueue {
+  private readonly queues = new Map<string, Array<() => Promise<void>>>();
+  private readonly activeKeys = new Set<string>();
+  private readonly readyKeys: string[] = [];
+  private readonly drainWaiters = new Set<() => void>();
+  private outstanding = 0;
+  private closed = false;
 
-  constructor(private readonly onError?: (error: unknown) => void) {}
+  constructor(
+    private readonly options: {
+      concurrency: number;
+      capacity: number;
+      onError?: (error: unknown) => void;
+    },
+  ) {
+    if (!Number.isInteger(options.concurrency) || options.concurrency < 1) {
+      throw new Error("Task queue concurrency must be a positive integer.");
+    }
+    if (!Number.isInteger(options.capacity) || options.capacity < 1) {
+      throw new Error("Task queue capacity must be a positive integer.");
+    }
+  }
 
-  enqueue(task: () => Promise<void>): void {
-    this.tail = this.tail
-      .then(task)
-      .catch((error) => this.onError?.(error));
+  enqueue(key: string, task: () => Promise<void>): boolean {
+    if (this.closed || this.outstanding >= this.options.capacity) return false;
+    const existing = this.queues.get(key);
+    if (existing) {
+      existing.push(task);
+    } else {
+      this.queues.set(key, [task]);
+      this.readyKeys.push(key);
+    }
+    this.outstanding += 1;
+    this.pump();
+    return true;
+  }
+
+  close(): void {
+    this.closed = true;
+    this.cancelPending();
   }
 
   async drain(): Promise<void> {
-    await this.tail;
+    if (this.outstanding === 0) return;
+    await new Promise<void>((resolve) => this.drainWaiters.add(resolve));
+  }
+
+  private cancelPending(): void {
+    this.readyKeys.length = 0;
+    for (const [key, tasks] of this.queues) {
+      this.outstanding -= tasks.length;
+      tasks.length = 0;
+      if (!this.activeKeys.has(key)) this.queues.delete(key);
+    }
+    this.resolveDrainIfIdle();
+  }
+
+  private pump(): void {
+    while (
+      this.activeKeys.size < this.options.concurrency &&
+      this.readyKeys.length > 0
+    ) {
+      const key = this.readyKeys.shift()!;
+      if (this.activeKeys.has(key)) continue;
+      const tasks = this.queues.get(key);
+      const task = tasks?.shift();
+      if (!tasks || !task) {
+        this.queues.delete(key);
+        continue;
+      }
+      this.activeKeys.add(key);
+      void Promise.resolve()
+        .then(task)
+        .catch((error) => {
+          try {
+            this.options.onError?.(error);
+          } catch {
+            // A reporting failure must not stall the queue.
+          }
+        })
+        .finally(() => {
+          this.outstanding -= 1;
+          this.activeKeys.delete(key);
+          if ((this.queues.get(key)?.length ?? 0) > 0) {
+            this.readyKeys.push(key);
+          } else {
+            this.queues.delete(key);
+          }
+          this.pump();
+          this.resolveDrainIfIdle();
+        });
+    }
+  }
+
+  private resolveDrainIfIdle(): void {
+    if (this.outstanding !== 0) return;
+    for (const resolve of this.drainWaiters) resolve();
+    this.drainWaiters.clear();
   }
 }
 
@@ -106,6 +226,7 @@ const defaultDelay = (milliseconds: number, signal: AbortSignal): Promise<void> 
 
 export const runManagedAvatarLease = async (params: {
   client: Pick<SpotClient, "getAvatarState" | "joinAvatar">;
+  accountId: string;
   worldId: string;
   avatar: SpotAvatarStartupConfig;
   signal: AbortSignal;
@@ -113,7 +234,7 @@ export const runManagedAvatarLease = async (params: {
   log?: ChannelLogSink;
   onIssue?: (issue: string | undefined) => void;
 }): Promise<void> => {
-  const { client, worldId, avatar, signal, log, onIssue } = params;
+  const { client, accountId, worldId, avatar, signal, log, onIssue } = params;
   const delay = params.delay ?? defaultDelay;
   const ttlSeconds = resolveAvatarLeaseTtlSeconds(avatar.ttlSeconds);
   const renewalIntervalMs = avatarLeaseRenewalIntervalMs(ttlSeconds);
@@ -122,19 +243,64 @@ export const runManagedAvatarLease = async (params: {
   let waitBeforeAttempt = false;
   let nextDelayMs = renewalIntervalMs;
 
+  const waitForDelayOrStateChange = async (milliseconds: number) => {
+    const subscription = subscribeManagedAvatarLeaseChange(
+      accountId,
+      worldId,
+      signal,
+    );
+    const delayController = new AbortController();
+    const delaySignal = AbortSignal.any([signal, delayController.signal]);
+    try {
+      await Promise.race([
+        delay(milliseconds, delaySignal),
+        subscription.promise,
+      ]);
+    } finally {
+      delayController.abort();
+      subscription.dispose();
+    }
+  };
+
   while (!signal.aborted) {
+    if (isManagedAvatarLeaseSuppressed(accountId, worldId)) {
+      const subscription = subscribeManagedAvatarLeaseChange(
+        accountId,
+        worldId,
+        signal,
+      );
+      try {
+        if (isManagedAvatarLeaseSuppressed(accountId, worldId)) {
+          await subscription.promise;
+        }
+      } finally {
+        subscription.dispose();
+      }
+      waitBeforeAttempt = false;
+      continue;
+    }
     if (waitBeforeAttempt) {
-      await delay(nextDelayMs, signal);
+      await waitForDelayOrStateChange(nextDelayMs);
       if (signal.aborted) return;
+      if (isManagedAvatarLeaseSuppressed(accountId, worldId)) continue;
     }
     waitBeforeAttempt = true;
 
+    const attemptRevision = getManagedAvatarLeaseRevision(accountId, worldId);
+    const finishAttempt = beginManagedAvatarLeaseAttempt(accountId, worldId);
+    if (!finishAttempt) {
+      nextDelayMs = renewalIntervalMs;
+      waitBeforeAttempt = false;
+      continue;
+    }
+
     try {
-      const current = await client.getAvatarState(worldId);
+      const current = await client.getAvatarState(worldId, { signal });
       if (signal.aborted) return;
       await client.joinAvatar(
         worldId,
         current.joined ? { ttlSeconds } : { ...startupTarget, ttlSeconds },
+        { signal },
       );
       hasSucceeded = true;
       nextDelayMs = renewalIntervalMs;
@@ -150,9 +316,20 @@ export const runManagedAvatarLease = async (params: {
       );
       log?.warn(issue);
       onIssue?.(issue);
+    } finally {
+      const stateChangedDuringAttempt =
+        getManagedAvatarLeaseRevision(accountId, worldId) !== attemptRevision;
+      finishAttempt();
+      if (stateChangedDuringAttempt) waitBeforeAttempt = false;
     }
   }
 };
+
+export const shouldAcceptSpotEventFrame = (
+  account: ResolvedSpotAccount,
+  frame: SpotEventFrame,
+): boolean =>
+  !account.orgId || frame.orgId === null || frame.orgId === account.orgId;
 
 const parseFrame = (raw: RawData): SpotServerFrame | null => {
   try {
@@ -243,14 +420,15 @@ export const dispatchSpotMessage = async (params: {
   runtime: SpotChannelRuntime;
   client: SpotClient;
   event: SpotMessageEvent;
+  signal?: AbortSignal;
   log?: ChannelLogSink;
   onOutbound?: () => void;
 }): Promise<void> => {
   const { cfg, account, runtime, client, event, log } = params;
   const isDirect = event.isDirectMessage;
   const peer = {
-    kind: isDirect ? ("direct" as const) : ("group" as const),
-    id: isDirect ? event.userId : event.threadId,
+    kind: "group" as const,
+    id: event.threadId,
   };
   const route = runtime.routing.resolveAgentRoute({
     cfg,
@@ -303,6 +481,9 @@ export const dispatchSpotMessage = async (params: {
       senderLabel: senderName,
     },
     access: {
+      commands: {
+        authorized: true,
+      },
       mentions: {
         canDetectMention: true,
         wasMentioned: event.isMentioned,
@@ -343,7 +524,9 @@ export const dispatchSpotMessage = async (params: {
         if (!text) return { visibleReplySent: false };
         const messageIds: string[] = [];
         for (const chunk of chunkSpotText(text)) {
-          const created = await client.sendThreadMessage(event.threadId, chunk);
+          const created = await client.sendThreadMessage(event.threadId, chunk, {
+            signal: params.signal,
+          });
           messageIds.push(created.id);
           params.onOutbound?.();
         }
@@ -360,6 +543,7 @@ export const dispatchSpotMessage = async (params: {
       onRecordError: (error) =>
         log?.warn(`Spot session metadata update failed: ${String(error)}`),
     },
+    ...(params.signal ? { replyOptions: { abortSignal: params.signal } } : {}),
   });
 };
 
@@ -435,18 +619,30 @@ const connectOnce = async (
     state.lastError = message;
     updateStatus(ctx, { connected: false, running: true, lastError: message });
   };
-  const queue = new SerialTaskQueue((error) => {
-    ctx.log?.error(`Spot inbound processing failed: ${String(error)}`);
-    markGatewayIssue(`Spot inbound processing failed: ${String(error)}`);
+  const queue = new BoundedKeyedTaskQueue({
+    concurrency: MAX_SPOT_INBOUND_CONCURRENCY,
+    capacity: MAX_SPOT_INBOUND_BACKLOG,
+    onError: (error) => {
+      ctx.log?.error(`Spot inbound processing failed: ${String(error)}`);
+      markGatewayIssue(`Spot inbound processing failed: ${String(error)}`);
+    },
   });
+  const helloEventBuffer = new SpotHelloEventBuffer();
   const connectionController = new AbortController();
   let avatarLeaseTask: Promise<void> | undefined;
 
-  const handleFrame = async (frame: SpotServerFrame): Promise<void> => {
+  const handleControlFrame = (
+    frame: Exclude<SpotServerFrame, SpotEventFrame>,
+  ): void => {
     if (frame.op === "hello") {
       state.helloReceived = true;
       state.selfUserId = frame.self.id;
       state.scopeIssue = formatMissingSpotScopes(ctx.account, frame.scopes);
+      if (ctx.account.orgId && !frame.orgIds.includes(ctx.account.orgId)) {
+        state.gatewayIssue =
+          `Spot account is configured for organization ${ctx.account.orgId}, ` +
+          "but the API token cannot access it.";
+      }
       subscribeAfterHello(ws, ctx.account, frame);
       updateStatus(ctx, {
         lastConnectedAt: Date.now(),
@@ -459,6 +655,7 @@ const connectOnce = async (
       ) {
         avatarLeaseTask ??= runManagedAvatarLease({
           client,
+          accountId: ctx.account.accountId,
           worldId: ctx.account.worldId,
           avatar: ctx.account.avatar,
           signal: connectionController.signal,
@@ -476,6 +673,7 @@ const connectOnce = async (
           refreshGatewayHealth();
         });
       }
+      helloEventBuffer.open(handleEventFrame);
       return;
     }
     if (frame.op === "ack") {
@@ -496,7 +694,9 @@ const connectOnce = async (
       refreshGatewayHealth();
       return;
     }
-    const eventFrame = frame as SpotEventFrame;
+  };
+
+  const handleEventFrame = (eventFrame: SpotEventFrame): void => {
     if (state.lastSeq > 0 && eventFrame.seq !== state.lastSeq + 1) {
       state.sequenceIssue =
         `Spot Agent Gateway sequence gap: expected ${state.lastSeq + 1}, ` +
@@ -505,6 +705,7 @@ const connectOnce = async (
       refreshGatewayHealth();
     }
     state.lastSeq = eventFrame.seq;
+    if (!shouldAcceptSpotEventFrame(ctx.account, eventFrame)) return;
     if (eventFrame.type !== "message.created" || !isMessagePayload(eventFrame.payload)) {
       return;
     }
@@ -512,15 +713,25 @@ const connectOnce = async (
     if (deduper.hasOrAdd(event.id)) return;
     if (!shouldActivateSpotMessage(ctx.account, event, state.selfUserId)) return;
     updateStatus(ctx, { lastInboundAt: Date.now(), lastEventAt: Date.now() });
-    await dispatchSpotMessage({
-      cfg: ctx.cfg,
-      account: ctx.account,
-      runtime,
-      client,
-      event,
-      ...(ctx.log ? { log: ctx.log } : {}),
-      onOutbound: () => updateStatus(ctx, { lastOutboundAt: Date.now() }),
-    });
+    const accepted = queue.enqueue(event.threadId, () =>
+      dispatchSpotMessage({
+        cfg: ctx.cfg,
+        account: ctx.account,
+        runtime,
+        client,
+        event,
+        signal: connectionController.signal,
+        ...(ctx.log ? { log: ctx.log } : {}),
+        onOutbound: () => updateStatus(ctx, { lastOutboundAt: Date.now() }),
+      }),
+    );
+    if (!accepted) {
+      const issue =
+        `Spot inbound backlog reached ${MAX_SPOT_INBOUND_BACKLOG}; ` +
+        `dropped message ${event.id} from thread ${event.threadId}.`;
+      ctx.log?.error(issue);
+      markGatewayIssue(issue);
+    }
   };
 
   const result = await new Promise<ConnectionResult>((resolve) => {
@@ -539,7 +750,17 @@ const connectOnce = async (
         ctx.log?.warn("Spot Agent Gateway sent an invalid frame.");
         return;
       }
-      queue.enqueue(() => handleFrame(frame));
+      if (frame.op === "event") {
+        if (!helloEventBuffer.push(frame, handleEventFrame)) {
+          const issue =
+            `Spot Agent Gateway sent more than ${MAX_SPOT_INBOUND_BACKLOG} ` +
+            "events before hello; excess events were dropped.";
+          ctx.log?.error(issue);
+          markGatewayIssue(issue);
+        }
+      } else {
+        handleControlFrame(frame);
+      }
     });
     ws.on("error", (error) => {
       state.gatewayIssue = `Spot Agent Gateway websocket error: ${error.message}`;
@@ -547,6 +768,7 @@ const connectOnce = async (
     });
     ws.once("close", (code, reason) => {
       connectionController.abort();
+      queue.close();
       ctx.abortSignal.removeEventListener("abort", onAbort);
       resolve({
         helloReceived: state.helloReceived,
@@ -569,6 +791,7 @@ export const startSpotGatewayAccount = async (
   const client = new SpotClient({
     baseUrl: ctx.account.baseUrl,
     token: ctx.account.token,
+    signal: ctx.abortSignal,
   });
   const createWebSocket =
     dependencies.createWebSocket ??

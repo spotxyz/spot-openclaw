@@ -1,6 +1,8 @@
 import {
+  buildChannelOutboundSessionRoute,
   createChannelPluginBase,
   createChatChannelPlugin,
+  type ChannelOutboundSessionRouteParams,
   type ChannelPlugin,
 } from "openclaw/plugin-sdk/channel-core";
 
@@ -13,10 +15,12 @@ import {
   listSpotAccountIds,
   resolveSpotAccount,
   spotSecretTargetRegistryEntries,
+  validateSpotBaseUrl,
 } from "./config.js";
 import {
   normalizeSpotTarget,
   parseSpotTarget,
+  resolveSpotThread,
   spotMessageAdapter,
   spotOutboundAdapter,
 } from "./outbound.js";
@@ -34,6 +38,36 @@ export interface SpotProbe {
   orgIds: string[];
   scopes: string[];
 }
+
+export interface SpotSessionRouteDependencies {
+  createClient?: (account: ResolvedSpotAccount) => SpotClient;
+}
+
+export const resolveSpotOutboundSessionRoute = async (
+  params: ChannelOutboundSessionRouteParams,
+  dependencies: SpotSessionRouteDependencies = {},
+) => {
+  const account = resolveSpotAccount(params.cfg, params.accountId);
+  const client =
+    dependencies.createClient?.(account) ??
+    new SpotClient({ baseUrl: account.baseUrl, token: account.token });
+  const threadId = await resolveSpotThread(
+    client,
+    account,
+    parseSpotTarget(params.target),
+  );
+  return buildChannelOutboundSessionRoute({
+    cfg: params.cfg,
+    agentId: params.agentId,
+    channel: SPOT_CHANNEL_ID,
+    ...(params.accountId === undefined ? {} : { accountId: params.accountId }),
+    recipientSessionExact: true,
+    peer: { kind: "group", id: threadId },
+    chatType: "group",
+    from: `spot:group:${threadId}`,
+    to: `thread:${threadId}`,
+  });
+};
 
 const sharedBase = createChannelPluginBase<ResolvedSpotAccount>({
     id: SPOT_CHANNEL_ID,
@@ -63,14 +97,7 @@ const sharedBase = createChannelPluginBase<ResolvedSpotAccount>({
       validateInput: ({ input }) => {
         if (!input.token?.trim()) return "A Spot API token is required.";
         if (input.baseUrl || input.url) {
-          try {
-            const url = new URL(input.baseUrl ?? input.url!);
-            if (url.protocol !== "http:" && url.protocol !== "https:") {
-              return "Spot baseUrl must use http or https.";
-            }
-          } catch {
-            return "Spot baseUrl must be a valid URL.";
-          }
+          return validateSpotBaseUrl(input.baseUrl ?? input.url!) ?? null;
         }
         return null;
       },
@@ -160,11 +187,7 @@ const base = {
       const client = new SpotClient({
         baseUrl: account.baseUrl,
         token: account.token,
-        fetch: (input, init) =>
-          globalThis.fetch(input, {
-            ...init,
-            signal: AbortSignal.timeout(timeoutMs),
-          }),
+        requestTimeoutMs: timeoutMs,
       });
       const me = await client.getMe();
       const scopeIssue = formatMissingSpotScopes(account, me.scopes);
@@ -210,7 +233,9 @@ const base = {
       }
     },
     inferTargetChatType: ({ to }) =>
-      parseSpotTarget(to).kind === "user" ? "direct" : "channel",
+      parseSpotTarget(to).kind === "user" ? "direct" : "group",
+    resolveOutboundSessionRoute: (params) =>
+      resolveSpotOutboundSessionRoute(params),
     targetResolver: {
       looksLikeId: (raw) => {
         try {
@@ -227,7 +252,7 @@ const base = {
           const target = parseSpotTarget(normalized);
           return {
             to: normalizeSpotTarget(normalized),
-            kind: target.kind === "user" ? "user" : "channel",
+            kind: target.kind === "user" ? "user" : "group",
             source: "normalized",
           };
         } catch {

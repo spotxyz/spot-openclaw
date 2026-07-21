@@ -60,7 +60,7 @@ export const normalizeSpotTarget = (raw: string): string => {
 const makeClient = (account: ResolvedSpotAccount): SpotClient =>
   new SpotClient({ baseUrl: account.baseUrl, token: account.token });
 
-const resolveSpotThread = async (
+export const resolveSpotThread = async (
   client: SpotClient,
   account: ResolvedSpotAccount,
   target: ParsedSpotTarget,

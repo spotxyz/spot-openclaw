@@ -1,6 +1,6 @@
 export const SPOT_CHANNEL_ID = "spot" as const;
 export const DEFAULT_ACCOUNT_ID = "default";
-export const DEFAULT_SPOT_BASE_URL = "https://spot.xyz";
+export const DEFAULT_SPOT_BASE_URL = "https://spotvirtual.com";
 
 export type SpotActivationMode = "direct-or-mention" | "mentions" | "all";
 

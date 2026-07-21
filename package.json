@@ -4,6 +4,14 @@
   "description": "OpenClaw channel and avatar controls for Spot virtual offices.",
   "type": "module",
   "license": "UNLICENSED",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/spotxyz/spot-openclaw.git"
+  },
+  "homepage": "https://github.com/spotxyz/spot-openclaw#readme",
+  "bugs": {
+    "url": "https://github.com/spotxyz/spot-openclaw/issues"
+  },
   "files": [
     "dist",
     "src",
@@ -16,6 +24,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "check": "tsc -p tsconfig.json --noEmit",
+    "prepare": "npm run build",
     "test": "vitest run",
     "test:watch": "vitest"
   },

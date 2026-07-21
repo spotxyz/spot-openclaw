@@ -6,7 +6,7 @@ This is an OpenClaw **channel plugin** (the most precise current term), with com
 
 ## Capabilities
 
-- Serialized, deduplicated inbound `message.created` handling with mention/DM activation, sender allowlisting, self filtering, bot-loop protection, and reconnect backoff.
+- Per-conversation serialized, bounded inbound `message.created` handling with limited cross-conversation concurrency, deduplication, mention/DM activation, sender allowlisting, self filtering, bot-loop protection, and reconnect backoff.
 - Text replies and proactive text sends to `thread:<threadId>`; `user:<userId>` creates/resolves a DM thread first.
 - Managed-avatar observe, join, leave, move, teleport, room movement, facing, and emote tools.
 - Room discovery with access decisions and canonical chat thread ids.
@@ -25,6 +25,8 @@ This is an OpenClaw **channel plugin** (the most precise current term), with com
   - `AvatarWrite` for join, leave, movement, facing, and emotes.
 - Spot server support for `GET /api/world/:worldId/spots`. This endpoint returns room metadata, access decisions, and thread ids without exposing floorplan geometry.
 
+API token scopes and the bot user's effective Spot permissions are separate checks. Scopes authorize an API surface; they do not override organization, world, room, or role policy. Provision the bot user with the normal effective permissions needed for the rooms and actions it will use. In particular, `canViewChatHistory` is required for REST history reads and any future missed-event reconciliation. The connector does not currently fetch or replay missed messages.
+
 ## Develop
 
 ```bash
@@ -32,6 +34,7 @@ npm install
 npm run check
 npm test
 npm run build
+npm pack --dry-run
 ```
 
 Link the checkout into a development OpenClaw instance:
@@ -80,9 +83,15 @@ Store the token in a secret provider rather than directly in `openclaw.json`. Wi
 
 The resolved secret must be a non-empty string. File and exec SecretRefs are also accepted. A literal token works for development but is not recommended.
 
+`baseUrl` defaults to `https://spotvirtual.com`. HTTPS is required for remote hosts so bearer tokens are never sent over plaintext; `http://localhost`, `http://*.localhost`, `http://127.x.x.x`, and `http://[::1]` remain available for local development.
+
 Inbound activation is fail-closed: it is disabled until `allowFrom` contains exact Spot user ids. `"allowFrom": ["*"]` explicitly allows every sender visible on the subscribed surfaces, so use that only when the whole Spot audience is trusted. Bot-authored events are still ignored unless `allowBotMessages` is explicitly enabled.
 
 With `avatar.joinOnStart` enabled, the gateway maintains an avatar lease for the configured world. Connects and reconnects preserve an already-joined avatar's current room and position; the startup `spotId`/position is used only when the avatar is absent. The lease defaults to 600 seconds, accepts configured values from 30 through 3,600 seconds, and renews at half the lease lifetime while the connection remains active.
+
+`avatar.joinOnStart` requires a `worldId` after account defaults are merged. An explicit `spot_leave` pauses automatic renewal for that account and world. A successful `spot_join` or `spot_move_to_room` resumes it and wakes the lease manager immediately; a failed or cancelled join leaves renewal paused.
+
+When `orgId` is configured, the connector accepts events explicitly scoped to that organization and filters events scoped to other organizations. Spot direct-message frames have `orgId: null`; those remain eligible and are still protected by `allowFrom` and activation policy.
 
 ### Named accounts
 
@@ -122,7 +131,9 @@ Top-level fields are inherited by named accounts, so a shared base URL can be co
 - `spot:<spotId-or-slug>` — convenience target that resolves through the configured world's room list.
 - `world:<worldId>` — convenience target for the configured avatar's current room in that world.
 
-Inbound events always establish `thread:<event.threadId>` as the durable reply target. They do not carry a world id; avatar tools use `channels.spot.worldId` (or an explicit tool argument).
+Inbound events always establish `thread:<event.threadId>` as the durable reply target and canonical OpenClaw session identity, including DMs. `user:`, `spot:`, and `world:` convenience targets are resolved to that same thread identity before outbound session routing. Gateway events received before the `hello` identity frame are buffered so self filtering is active before dispatch. Inbound events do not carry a world id; avatar tools use `channels.spot.worldId` (or an explicit tool argument).
+
+Persist Spot ids and thread ids, not the discovery response's floorplan `roomId`. A Spot id is the logical room identity used by chat and avatar targeting; the floorplan room id represents current geometry and may change after topology edits.
 
 ## Avatar tools
 
@@ -142,8 +153,9 @@ Use OpenClaw's shared `message` tool for speech. The connector deliberately does
 ## Security and failure behavior
 
 - Tokens are used only in the `Authorization` header and are never included in errors or status snapshots.
+- REST requests have a 15-second deadline and honor account, connection, and tool cancellation where those signals are available.
 - The Agent Gateway connection is listen-only; all mutations go through authorized REST endpoints.
-- Inbound events are processed one at a time per account to preserve conversation ordering.
+- Inbound messages are ordered per conversation. Up to four conversations run concurrently, with a maximum account backlog of 256 adopted messages; overflow is surfaced as an unhealthy account instead of growing memory without bound.
 - Event ids are bounded-deduplicated across reconnects.
 - Agent Gateway delivery is at-most-once, not lossless. A sequence gap marks the account unhealthy and is logged, but is not automatically reconciled today.
 - Reconciliation TODO: after reconnect or a sequence gap, fetch missed events for explicitly configured `subscribeThreads` via the thread-events REST API. Default and world streams need additional server cursor/thread-discovery support before they can be reconciled safely.
@@ -160,3 +172,7 @@ Spot Agent Gateway -- message.created --> OpenClaw channel runtime --> agent
 
 agent -- spot_* tools --> Spot REST avatar + room discovery --> Spot world
 ```
+
+## License
+
+This repository is public source, but the package is currently `UNLICENSED`. No open-source license or redistribution permission is granted unless the repository owners add one explicitly.
