@@ -215,11 +215,39 @@ const base = {
       linked: !!probe,
       statusState: probe ? "linked" : "configured",
       running: runtime?.running ?? false,
-      connected: runtime?.connected ?? false,
-      ...(runtime?.lastError ? { lastError: runtime.lastError } : {}),
-      ...(runtime?.lastConnectedAt === undefined
-        ? {}
-        : { lastConnectedAt: runtime.lastConnectedAt }),
+      lastStartAt: runtime?.lastStartAt ?? null,
+      lastStopAt: runtime?.lastStopAt ?? null,
+      lastError: runtime?.lastError ?? null,
+      probe,
+      lastInboundAt: runtime?.lastInboundAt ?? null,
+      lastOutboundAt: runtime?.lastOutboundAt ?? null,
+      ...(typeof runtime?.connected === "boolean"
+        ? { connected: runtime.connected }
+        : {}),
+      ...(typeof runtime?.restartPending === "boolean"
+        ? { restartPending: runtime.restartPending }
+        : {}),
+      ...(typeof runtime?.reconnectAttempts === "number"
+        ? { reconnectAttempts: runtime.reconnectAttempts }
+        : {}),
+      ...(typeof runtime?.lastConnectedAt === "number"
+        ? { lastConnectedAt: runtime.lastConnectedAt }
+        : {}),
+      ...(runtime?.lastDisconnect
+        ? { lastDisconnect: runtime.lastDisconnect }
+        : {}),
+      ...(typeof runtime?.lastEventAt === "number"
+        ? { lastEventAt: runtime.lastEventAt }
+        : {}),
+      ...(typeof runtime?.lastTransportActivityAt === "number"
+        ? { lastTransportActivityAt: runtime.lastTransportActivityAt }
+        : {}),
+      ...(typeof runtime?.healthState === "string"
+        ? { healthState: runtime.healthState }
+        : {}),
+      ...(runtime?.terminalDisconnect
+        ? { terminalDisconnect: runtime.terminalDisconnect }
+        : {}),
     }),
   },
   message: spotMessageAdapter,
