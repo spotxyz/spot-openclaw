@@ -82,6 +82,8 @@ The resolved secret must be a non-empty string. File and exec SecretRefs are als
 
 Inbound activation is fail-closed: it is disabled until `allowFrom` contains exact Spot user ids. `"allowFrom": ["*"]` explicitly allows every sender visible on the subscribed surfaces, so use that only when the whole Spot audience is trusted. Bot-authored events are still ignored unless `allowBotMessages` is explicitly enabled.
 
+With `avatar.joinOnStart` enabled, the gateway maintains an avatar lease for the configured world. Connects and reconnects preserve an already-joined avatar's current room and position; the startup `spotId`/position is used only when the avatar is absent. The lease defaults to 600 seconds, accepts configured values from 30 through 3,600 seconds, and renews at half the lease lifetime while the connection remains active.
+
 ### Named accounts
 
 Top-level fields are inherited by named accounts, so a shared base URL can be combined with per-account tokens and worlds:

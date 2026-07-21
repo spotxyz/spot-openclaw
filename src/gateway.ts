@@ -11,6 +11,7 @@ import { formatMissingSpotScopes, SPOT_SCOPE } from "./scopes.js";
 import {
   SPOT_CHANNEL_ID,
   type ResolvedSpotAccount,
+  type SpotAvatarStartupConfig,
   type SpotEventFrame,
   type SpotHelloFrame,
   type SpotMessageEvent,
@@ -24,8 +25,29 @@ type SpotChannelRuntime = PluginRuntime["channel"];
 export interface GatewayDependencies {
   createWebSocket?: (url: string, options: ClientOptions) => WebSocket;
   delay?: (milliseconds: number, signal: AbortSignal) => Promise<void>;
+  avatarLeaseDelay?: (
+    milliseconds: number,
+    signal: AbortSignal,
+  ) => Promise<void>;
   random?: () => number;
 }
+
+export const DEFAULT_SPOT_AVATAR_TTL_SECONDS = 600;
+export const MIN_SPOT_AVATAR_TTL_SECONDS = 30;
+export const MAX_SPOT_AVATAR_TTL_SECONDS = 3_600;
+export const MAX_SPOT_AVATAR_RETRY_DELAY_MS = 30_000;
+
+export const resolveAvatarLeaseTtlSeconds = (ttlSeconds?: number): number => {
+  const resolved = ttlSeconds ?? DEFAULT_SPOT_AVATAR_TTL_SECONDS;
+  if (!Number.isFinite(resolved)) return DEFAULT_SPOT_AVATAR_TTL_SECONDS;
+  return Math.min(
+    MAX_SPOT_AVATAR_TTL_SECONDS,
+    Math.max(MIN_SPOT_AVATAR_TTL_SECONDS, Math.trunc(resolved)),
+  );
+};
+
+export const avatarLeaseRenewalIntervalMs = (ttlSeconds?: number): number =>
+  resolveAvatarLeaseTtlSeconds(ttlSeconds) * 500;
 
 export class SerialTaskQueue {
   private tail: Promise<void> = Promise.resolve();
@@ -81,6 +103,56 @@ const defaultDelay = (milliseconds: number, signal: AbortSignal): Promise<void> 
     }
     signal.addEventListener("abort", finish, { once: true });
   });
+
+export const runManagedAvatarLease = async (params: {
+  client: Pick<SpotClient, "getAvatarState" | "joinAvatar">;
+  worldId: string;
+  avatar: SpotAvatarStartupConfig;
+  signal: AbortSignal;
+  delay?: (milliseconds: number, signal: AbortSignal) => Promise<void>;
+  log?: ChannelLogSink;
+  onIssue?: (issue: string | undefined) => void;
+}): Promise<void> => {
+  const { client, worldId, avatar, signal, log, onIssue } = params;
+  const delay = params.delay ?? defaultDelay;
+  const ttlSeconds = resolveAvatarLeaseTtlSeconds(avatar.ttlSeconds);
+  const renewalIntervalMs = avatarLeaseRenewalIntervalMs(ttlSeconds);
+  const { joinOnStart: _joinOnStart, ...startupTarget } = avatar;
+  let hasSucceeded = false;
+  let waitBeforeAttempt = false;
+  let nextDelayMs = renewalIntervalMs;
+
+  while (!signal.aborted) {
+    if (waitBeforeAttempt) {
+      await delay(nextDelayMs, signal);
+      if (signal.aborted) return;
+    }
+    waitBeforeAttempt = true;
+
+    try {
+      const current = await client.getAvatarState(worldId);
+      if (signal.aborted) return;
+      await client.joinAvatar(
+        worldId,
+        current.joined ? { ttlSeconds } : { ...startupTarget, ttlSeconds },
+      );
+      hasSucceeded = true;
+      nextDelayMs = renewalIntervalMs;
+      if (signal.aborted) return;
+      onIssue?.(undefined);
+    } catch (error) {
+      if (signal.aborted) return;
+      const phase = hasSucceeded ? "renewal" : "initialization";
+      const issue = `Spot avatar lease ${phase} failed: ${String(error)}`;
+      nextDelayMs = Math.min(
+        renewalIntervalMs,
+        MAX_SPOT_AVATAR_RETRY_DELAY_MS,
+      );
+      log?.warn(issue);
+      onIssue?.(issue);
+    }
+  }
+};
 
 const parseFrame = (raw: RawData): SpotServerFrame | null => {
   try {
@@ -298,11 +370,29 @@ interface ConnectionResult {
   error?: string;
 }
 
+export interface GatewayHealthIssues {
+  scopeIssue?: string | undefined;
+  subscriptionIssue?: string | undefined;
+  gatewayIssue?: string | undefined;
+  sequenceIssue?: string | undefined;
+  avatarLeaseIssue?: string | undefined;
+}
+
+export const selectGatewayHealthIssue = (
+  issues: GatewayHealthIssues,
+): string | undefined =>
+  issues.scopeIssue ??
+  issues.subscriptionIssue ??
+  issues.gatewayIssue ??
+  issues.sequenceIssue ??
+  issues.avatarLeaseIssue;
+
 const connectOnce = async (
   ctx: SpotGatewayContext,
   client: SpotClient,
   deduper: BoundedEventDeduper,
   createWebSocket: NonNullable<GatewayDependencies["createWebSocket"]>,
+  avatarLeaseDelay: NonNullable<GatewayDependencies["avatarLeaseDelay"]>,
 ): Promise<ConnectionResult> => {
   const runtime = ctx.channelRuntime as SpotChannelRuntime | undefined;
   if (!runtime) {
@@ -315,26 +405,25 @@ const connectOnce = async (
     selfUserId?: string;
     lastSeq: number;
     helloReceived: boolean;
-    lastError?: string;
+    lastError: string | undefined;
     scopeIssue: string | undefined;
     subscriptionIssue: string | undefined;
     gatewayIssue: string | undefined;
     sequenceIssue: string | undefined;
+    avatarLeaseIssue: string | undefined;
   } = {
     lastSeq: 0,
     helloReceived: false,
+    lastError: undefined,
     scopeIssue: undefined,
     subscriptionIssue: undefined,
     gatewayIssue: undefined,
     sequenceIssue: undefined,
+    avatarLeaseIssue: undefined,
   };
   const refreshGatewayHealth = (): void => {
-    const issue =
-      state.scopeIssue ??
-      state.subscriptionIssue ??
-      state.gatewayIssue ??
-      state.sequenceIssue;
-    if (issue) state.lastError = issue;
+    const issue = selectGatewayHealthIssue(state);
+    state.lastError = issue;
     updateStatus(ctx, {
       connected: !issue,
       running: true,
@@ -350,6 +439,8 @@ const connectOnce = async (
     ctx.log?.error(`Spot inbound processing failed: ${String(error)}`);
     markGatewayIssue(`Spot inbound processing failed: ${String(error)}`);
   });
+  const connectionController = new AbortController();
+  let avatarLeaseTask: Promise<void> | undefined;
 
   const handleFrame = async (frame: SpotServerFrame): Promise<void> => {
     if (frame.op === "hello") {
@@ -366,14 +457,24 @@ const connectOnce = async (
         ctx.account.worldId &&
         frame.scopes.includes(SPOT_SCOPE.AvatarWrite)
       ) {
-        try {
-          await client.joinAvatar(ctx.account.worldId, ctx.account.avatar);
-        } catch (error) {
-          const message = `Spot avatar auto-join failed: ${String(error)}`;
-          ctx.log?.warn(message);
-          state.gatewayIssue = message;
+        avatarLeaseTask ??= runManagedAvatarLease({
+          client,
+          worldId: ctx.account.worldId,
+          avatar: ctx.account.avatar,
+          signal: connectionController.signal,
+          delay: avatarLeaseDelay,
+          ...(ctx.log ? { log: ctx.log } : {}),
+          onIssue: (issue) => {
+            state.avatarLeaseIssue = issue;
+            refreshGatewayHealth();
+          },
+        }).catch((error) => {
+          if (connectionController.signal.aborted) return;
+          const issue = `Spot avatar lease stopped unexpectedly: ${String(error)}`;
+          ctx.log?.warn(issue);
+          state.avatarLeaseIssue = issue;
           refreshGatewayHealth();
-        }
+        });
       }
       return;
     }
@@ -424,6 +525,7 @@ const connectOnce = async (
 
   const result = await new Promise<ConnectionResult>((resolve) => {
     const onAbort = () => {
+      connectionController.abort();
       try {
         ws.close(1000, "OpenClaw account stopped");
       } catch {
@@ -440,9 +542,11 @@ const connectOnce = async (
       queue.enqueue(() => handleFrame(frame));
     });
     ws.on("error", (error) => {
-      state.lastError = error.message;
+      state.gatewayIssue = `Spot Agent Gateway websocket error: ${error.message}`;
+      refreshGatewayHealth();
     });
     ws.once("close", (code, reason) => {
+      connectionController.abort();
       ctx.abortSignal.removeEventListener("abort", onAbort);
       resolve({
         helloReceived: state.helloReceived,
@@ -451,8 +555,10 @@ const connectOnce = async (
         ...(state.lastError ? { error: state.lastError } : {}),
       });
     });
+    if (ctx.abortSignal.aborted) onAbort();
   });
   await queue.drain();
+  await avatarLeaseTask;
   return result;
 };
 
@@ -468,6 +574,7 @@ export const startSpotGatewayAccount = async (
     dependencies.createWebSocket ??
     ((url: string, options: ClientOptions) => new WebSocket(url, options));
   const delay = dependencies.delay ?? defaultDelay;
+  const avatarLeaseDelay = dependencies.avatarLeaseDelay ?? defaultDelay;
   const random = dependencies.random ?? Math.random;
   const deduper = new BoundedEventDeduper();
   let attempt = 0;
@@ -481,7 +588,13 @@ export const startSpotGatewayAccount = async (
   while (!ctx.abortSignal.aborted) {
     let result: ConnectionResult;
     try {
-      result = await connectOnce(ctx, client, deduper, createWebSocket);
+      result = await connectOnce(
+        ctx,
+        client,
+        deduper,
+        createWebSocket,
+        avatarLeaseDelay,
+      );
     } catch (error) {
       result = { helloReceived: false, error: String(error) };
     }
