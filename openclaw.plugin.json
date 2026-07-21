@@ -1,0 +1,344 @@
+{
+  "id": "spot",
+  "name": "Spot",
+  "description": "Spot chat channel and managed virtual-office avatar for OpenClaw.",
+  "activation": {
+    "onStartup": false
+  },
+  "skills": [
+    "./skills"
+  ],
+  "channels": [
+    "spot"
+  ],
+  "contracts": {
+    "tools": [
+      "spot_observe",
+      "spot_avatar_state",
+      "spot_rooms",
+      "spot_join",
+      "spot_leave",
+      "spot_move",
+      "spot_teleport",
+      "spot_move_to_room",
+      "spot_face",
+      "spot_emote"
+    ]
+  },
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {}
+  },
+  "channelConfigs": {
+    "spot": {
+      "label": "Spot",
+      "description": "Connect OpenClaw to Spot chat and manage a bot avatar in a virtual office.",
+      "schema": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "type": "object",
+        "definitions": {
+          "secretRef": {
+            "oneOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "source": {
+                    "const": "env"
+                  },
+                  "provider": {
+                    "type": "string",
+                    "pattern": "^[a-z][a-z0-9_-]{0,63}$"
+                  },
+                  "id": {
+                    "type": "string",
+                    "pattern": "^[A-Z][A-Z0-9_]{0,127}$"
+                  }
+                },
+                "required": [
+                  "source",
+                  "provider",
+                  "id"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "source": {
+                    "const": "file"
+                  },
+                  "provider": {
+                    "type": "string",
+                    "pattern": "^[a-z][a-z0-9_-]{0,63}$"
+                  },
+                  "id": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                },
+                "required": [
+                  "source",
+                  "provider",
+                  "id"
+                ],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "source": {
+                    "const": "exec"
+                  },
+                  "provider": {
+                    "type": "string",
+                    "pattern": "^[a-z][a-z0-9_-]{0,63}$"
+                  },
+                  "id": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                },
+                "required": [
+                  "source",
+                  "provider",
+                  "id"
+                ],
+                "additionalProperties": false
+              }
+            ]
+          },
+          "secretInput": {
+            "anyOf": [
+              {
+                "type": "string",
+                "minLength": 1
+              },
+              {
+                "$ref": "#/definitions/secretRef"
+              }
+            ]
+          },
+          "avatar": {
+            "type": "object",
+            "properties": {
+              "joinOnStart": {
+                "type": "boolean",
+                "default": false
+              },
+              "spotId": {
+                "type": "string"
+              },
+              "position": {
+                "type": "object",
+                "properties": {
+                  "x": {
+                    "type": "number"
+                  },
+                  "z": {
+                    "type": "number"
+                  }
+                },
+                "required": [
+                  "x",
+                  "z"
+                ],
+                "additionalProperties": false
+              },
+              "facing": {
+                "type": "number"
+              },
+              "ttlSeconds": {
+                "type": "integer",
+                "minimum": 30,
+                "maximum": 3600
+              }
+            },
+            "additionalProperties": false
+          },
+          "account": {
+            "type": "object",
+            "properties": {
+              "enabled": {
+                "type": "boolean"
+              },
+              "name": {
+                "type": "string"
+              },
+              "baseUrl": {
+                "type": "string",
+                "format": "uri",
+                "pattern": "^https?://"
+              },
+              "token": {
+                "$ref": "#/definitions/secretInput"
+              },
+              "orgId": {
+                "type": "string"
+              },
+              "worldId": {
+                "type": "string"
+              },
+              "subscribeWorlds": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "uniqueItems": true
+              },
+              "subscribeThreads": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "uniqueItems": true
+              },
+              "defaultTarget": {
+                "type": "string",
+                "description": "Default outbound target, normally thread:<threadId>."
+              },
+              "activationMode": {
+                "type": "string",
+                "enum": [
+                  "direct-or-mention",
+                  "mentions",
+                  "all"
+                ],
+                "default": "direct-or-mention"
+              },
+              "allowFrom": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "uniqueItems": true,
+                "default": [],
+                "description": "Exact Spot user ids allowed to activate the agent. Empty denies everyone; * explicitly allows everyone."
+              },
+              "allowBotMessages": {
+                "type": "boolean",
+                "default": false
+              },
+              "avatar": {
+                "$ref": "#/definitions/avatar"
+              }
+            },
+            "additionalProperties": false
+          }
+        },
+        "properties": {
+          "enabled": {
+            "type": "boolean"
+          },
+          "name": {
+            "type": "string"
+          },
+          "baseUrl": {
+            "type": "string",
+            "format": "uri",
+            "pattern": "^https?://"
+          },
+          "token": {
+            "$ref": "#/definitions/secretInput"
+          },
+          "orgId": {
+            "type": "string"
+          },
+          "worldId": {
+            "type": "string"
+          },
+          "subscribeWorlds": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "uniqueItems": true
+          },
+          "subscribeThreads": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "uniqueItems": true
+          },
+          "defaultTarget": {
+            "type": "string",
+            "description": "Default outbound target, normally thread:<threadId>."
+          },
+          "activationMode": {
+            "type": "string",
+            "enum": [
+              "direct-or-mention",
+              "mentions",
+              "all"
+            ],
+            "default": "direct-or-mention"
+          },
+          "allowFrom": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "uniqueItems": true,
+            "default": [],
+            "description": "Exact Spot user ids allowed to activate the agent. Empty denies everyone; * explicitly allows everyone."
+          },
+          "allowBotMessages": {
+            "type": "boolean",
+            "default": false
+          },
+          "avatar": {
+            "$ref": "#/definitions/avatar"
+          },
+          "accounts": {
+            "type": "object",
+            "propertyNames": {
+              "type": "string",
+              "minLength": 1
+            },
+            "additionalProperties": {
+              "$ref": "#/definitions/account"
+            }
+          }
+        },
+        "additionalProperties": false
+      },
+      "uiHints": {
+        "": {
+          "label": "Spot",
+          "help": "Spot Agent Gateway, chat, and managed-avatar configuration."
+        },
+        "baseUrl": {
+          "label": "Spot Base URL",
+          "placeholder": "https://spot.xyz"
+        },
+        "token": {
+          "label": "Spot API Token",
+          "help": "Bearer token with EventRead, EventWrite, WorldRead, AvatarWrite, and optionally ThreadWrite for initiated DMs.",
+          "sensitive": true
+        },
+        "worldId": {
+          "label": "Avatar World ID",
+          "help": "World used by avatar tools and included in Agent Gateway subscriptions."
+        },
+        "defaultTarget": {
+          "label": "Default Chat Target",
+          "placeholder": "thread:<threadId>"
+        },
+        "activationMode": {
+          "label": "Inbound Activation",
+          "help": "Choose whether every allowed message, mentions, or DMs plus mentions activate OpenClaw."
+        },
+        "allowFrom": {
+          "label": "Allowed Spot Users",
+          "help": "Fail-closed inbound allowlist. Add exact Spot user ids, or add * only when every Spot sender should activate the agent."
+        },
+        "allowBotMessages": {
+          "label": "Allow Bot Messages",
+          "help": "Disabled by default to prevent bot-to-bot reply loops.",
+          "advanced": true
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,63 @@
+{
+  "name": "@spotxyz/openclaw-spot",
+  "version": "0.1.0",
+  "description": "OpenClaw channel and avatar controls for Spot virtual offices.",
+  "type": "module",
+  "license": "UNLICENSED",
+  "files": [
+    "dist",
+    "src",
+    "skills",
+    "index.ts",
+    "setup-entry.ts",
+    "openclaw.plugin.json",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "check": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "typebox": "1.3.3",
+    "ws": "8.21.0"
+  },
+  "devDependencies": {
+    "@types/node": "26.1.0",
+    "@types/ws": "8.18.1",
+    "openclaw": "2026.7.1-2",
+    "typescript": "6.0.3",
+    "vitest": "4.0.17"
+  },
+  "peerDependencies": {
+    "openclaw": ">=2026.7.1-2 <2026.8.0"
+  },
+  "engines": {
+    "node": ">=24.15.0"
+  },
+  "openclaw": {
+    "extensions": [
+      "./index.ts"
+    ],
+    "runtimeExtensions": [
+      "./dist/index.js"
+    ],
+    "setupEntry": "./setup-entry.ts",
+    "runtimeSetupEntry": "./dist/setup-entry.js",
+    "channel": {
+      "id": "spot",
+      "label": "Spot",
+      "selectionLabel": "Spot virtual office",
+      "blurb": "Let an OpenClaw agent participate in Spot as a bot avatar."
+    },
+    "compat": {
+      "pluginApi": ">=2026.7.1-2 <2026.8.0",
+      "minGatewayVersion": "2026.7.1-2"
+    },
+    "build": {
+      "openclawVersion": "2026.7.1-2",
+      "pluginSdkVersion": "2026.7.1-2"
+    }
+  }
+}
