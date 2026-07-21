@@ -1,5 +1,8 @@
 import type { OpenClawConfig } from "openclaw/plugin-sdk/channel-core";
-import type { ChannelOutboundAdapter } from "openclaw/plugin-sdk/channel-runtime";
+import {
+  recordChannelActivity,
+  type ChannelOutboundAdapter,
+} from "openclaw/plugin-sdk/channel-runtime";
 import { createChannelMessageAdapterFromOutbound } from "openclaw/plugin-sdk/channel-outbound";
 import { chunkMarkdownText } from "openclaw/plugin-sdk/reply-runtime";
 
@@ -155,6 +158,11 @@ export const spotOutboundAdapter: ChannelOutboundAdapter = {
       ...(ctx.accountId === undefined ? {} : { accountId: ctx.accountId }),
       to: ctx.to,
       text: ctx.text,
+    });
+    recordChannelActivity({
+      channel: SPOT_CHANNEL_ID,
+      ...(ctx.accountId === undefined ? {} : { accountId: ctx.accountId }),
+      direction: "outbound",
     });
     return {
       channel: SPOT_CHANNEL_ID,

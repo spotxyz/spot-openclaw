@@ -1,5 +1,16 @@
 import type { OpenClawConfig } from "openclaw/plugin-sdk/channel-core";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+
+const { recordChannelActivity } = vi.hoisted(() => ({
+  recordChannelActivity: vi.fn(),
+}));
+
+vi.mock("openclaw/plugin-sdk/channel-runtime", async (importOriginal) => ({
+  ...(await importOriginal<
+    typeof import("openclaw/plugin-sdk/channel-runtime")
+  >()),
+  recordChannelActivity,
+}));
 
 import {
   chunkSpotText,
@@ -13,6 +24,11 @@ import {
   spotChannelPlugin,
 } from "./channel.js";
 import type { SpotClient } from "./client.js";
+
+afterEach(() => {
+  vi.clearAllMocks();
+  vi.unstubAllGlobals();
+});
 
 describe("Spot target grammar", () => {
   it.each([
@@ -123,6 +139,39 @@ describe("Spot target grammar", () => {
     expect(roomRoute).toMatchObject({
       peer: { kind: "group", id: "lobby-thread" },
       to: "thread:lobby-thread",
+    });
+  });
+
+  it("records successful outbound activity for channel status", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        new Response(JSON.stringify({ id: "event-1", threadId: "thread-1" }), {
+          status: 201,
+          headers: { "content-type": "application/json" },
+        }),
+      ),
+    );
+    const cfg = {
+      channels: {
+        spot: {
+          baseUrl: "https://spot.test",
+          token: "token",
+        },
+      },
+    } as OpenClawConfig;
+
+    await spotOutboundAdapter.sendText!({
+      cfg,
+      accountId: "default",
+      to: "thread:thread-1",
+      text: "hello",
+    } as never);
+
+    expect(recordChannelActivity).toHaveBeenCalledWith({
+      channel: "spot",
+      accountId: "default",
+      direction: "outbound",
     });
   });
 });
