@@ -90,6 +90,21 @@ Store the token in a secret provider rather than directly in `openclaw.json`. Wi
 
 The resolved secret must be a non-empty string. File and exec SecretRefs are also accepted. A literal token works for development but is not recommended.
 
+OpenClaw's default `coding` tool profile does not implicitly expose tools from third-party plugins. Keep that profile and opt into this plugin's avatar tools explicitly:
+
+```json
+{
+  "tools": {
+    "profile": "coding",
+    "alsoAllow": ["spot"]
+  }
+}
+```
+
+The plugin id grants tools owned by the enabled Spot plugin, including Spot tools added by future versions. Use the individual names in the [Avatar tools](#avatar-tools) table instead if you want a smaller, frozen subset.
+
+Restart the gateway after changing the tool policy or reinstalling or rebuilding the plugin.
+
 `baseUrl` defaults to `https://spotvirtual.com`. HTTPS is required for remote hosts so bearer tokens are never sent over plaintext; `http://localhost`, `http://*.localhost`, `http://127.x.x.x`, and `http://[::1]` remain available for local development.
 
 Inbound activation is fail-closed: it is disabled until `allowFrom` contains exact Spot user ids. `"allowFrom": ["*"]` explicitly allows every sender visible on the subscribed surfaces, so use that only when the whole Spot audience is trusted. Bot-authored events are still ignored unless `allowBotMessages` is explicitly enabled.
