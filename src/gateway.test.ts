@@ -608,11 +608,15 @@ describe("Spot Agent Gateway policy", () => {
     );
     expect(dispatchReply).toHaveBeenCalledWith(
       expect.objectContaining({
+        dispatcherOptions: {
+          typingCallbacks: expect.objectContaining({
+            onReplyStart: expect.any(Function),
+            onCleanup: expect.any(Function),
+          }),
+        },
         replyOptions: expect.objectContaining({
           abortSignal: abortController.signal,
-          onReplyStart: expect.any(Function),
-          onTypingCleanup: expect.any(Function),
-          typingKeepalive: true,
+          typingKeepalive: false,
         }),
       }),
     );
@@ -698,9 +702,9 @@ describe("Spot Agent Gateway policy", () => {
         parentSessionKey: "agent:main:spot:group:channel-1",
         modelParentSessionKey: "agent:main:spot:group:channel-1",
       });
-      await options.replyOptions.onReplyStart();
+      await options.dispatcherOptions.typingCallbacks.onReplyStart();
       await options.delivery.deliver({ text: "reply" });
-      options.replyOptions.onTypingCleanup();
+      options.dispatcherOptions.typingCallbacks.onCleanup();
     });
     const resolveAgentRoute = vi.fn(({ peer }: { peer: { id: string } }) => ({
       agentId: "main",

@@ -793,6 +793,14 @@ export const dispatchSpotMessage = async (params: {
       onError: (error, info) =>
         log?.error(`Spot ${info.kind} reply failed: ${String(error)}`),
     },
+    ...(typingCallbacks
+      ? {
+          // The buffered dispatcher owns reply lifecycle callbacks. Passing
+          // typing through dispatcherOptions lets it start at model-run time
+          // even when visible room replies are sent with the message tool.
+          dispatcherOptions: { typingCallbacks },
+        }
+      : {}),
     record: {
       onRecordError: (error) =>
         log?.warn(`Spot session metadata update failed: ${String(error)}`),
@@ -801,9 +809,8 @@ export const dispatchSpotMessage = async (params: {
       ...(params.signal ? { abortSignal: params.signal } : {}),
       ...(typingCallbacks
         ? {
-            onReplyStart: typingCallbacks.onReplyStart,
-            onTypingCleanup: () => typingCallbacks.onCleanup?.(),
-            typingKeepalive: true,
+            // createTypingCallbacks owns the 3s keepalive and 60s TTL.
+            typingKeepalive: false,
           }
         : { suppressTyping: true }),
     },
