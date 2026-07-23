@@ -49,18 +49,56 @@ describe("Spot account config", () => {
       token: "resolved-token",
       worldId: "world-1",
       activationMode: "direct-or-mention",
+      threadPolicies: {},
       allowBotMessages: false,
       monitorOrgChannels: false,
+      monitorAvatarActivity: false,
     });
     expect(listSpotAccountIds(cfg)).toEqual(["default"]);
+  });
+
+  it("keeps avatar activity opt-in", () => {
+    expect(
+      resolveSpotAccount(
+        config({
+          token: "resolved-token",
+          monitorAvatarActivity: true,
+        })
+      ).monitorAvatarActivity
+    ).toBe(true);
+  });
+
+  it("resolves per-thread activation policies", () => {
+    expect(
+      resolveSpotAccount(
+        config({
+          token: "resolved-token",
+          threadPolicies: {
+            "channel-1": { activationMode: "all" },
+          },
+        }),
+      ).threadPolicies,
+    ).toEqual({
+      "channel-1": { activationMode: "all" },
+    });
   });
 
   it("lets named accounts override inherited top-level fields", () => {
     const cfg = config({
       baseUrl: "https://spot.test",
       activationMode: "mentions",
+      threadPolicies: {
+        "shared-channel": { activationMode: "all" },
+      },
       accounts: {
-        hq: { token: "hq-token", worldId: "hq-world", activationMode: "all" },
+        hq: {
+          token: "hq-token",
+          worldId: "hq-world",
+          activationMode: "all",
+          threadPolicies: {
+            "hq-channel": { activationMode: "all" },
+          },
+        },
         eu: { token: "eu-token", worldId: "eu-world" },
       },
     });
@@ -70,6 +108,12 @@ describe("Spot account config", () => {
       baseUrl: "https://spot.test",
       worldId: "hq-world",
       activationMode: "all",
+      threadPolicies: {
+        "hq-channel": { activationMode: "all" },
+      },
+    });
+    expect(resolveSpotAccount(cfg, "eu").threadPolicies).toEqual({
+      "shared-channel": { activationMode: "all" },
     });
     expect(getMergedSpotAccountConfig(cfg, "eu").tokenPath).toBe(
       "channels.spot.accounts.eu.token",

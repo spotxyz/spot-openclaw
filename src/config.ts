@@ -15,6 +15,7 @@ import {
   DEFAULT_SPOT_BASE_URL,
   type ResolvedSpotAccount,
   type SpotAccountConfig,
+  type SpotActivationMode,
   type SpotChannelConfig,
 } from "./types.js";
 
@@ -68,7 +69,11 @@ export const getSpotChannelConfig = (
 export const listSpotAccountIds = (cfg: OpenClawConfig): string[] => {
   const section = getSpotChannelConfig(cfg);
   const ids = section.accounts ? Object.keys(section.accounts) : [];
-  if (!section.accounts || ids.length === 0 || hasConfiguredSecretInput(section.token)) {
+  if (
+    !section.accounts ||
+    ids.length === 0 ||
+    hasConfiguredSecretInput(section.token)
+  ) {
     if (!ids.includes(DEFAULT_ACCOUNT_ID)) ids.unshift(DEFAULT_ACCOUNT_ID);
   }
   return ids;
@@ -78,6 +83,19 @@ const getAccountLayer = (
   section: SpotChannelConfig,
   accountId: string,
 ): SpotAccountConfig => section.accounts?.[accountId] ?? {};
+
+export const resolveSpotThreadActivationMode = (
+  config: Pick<SpotAccountConfig, "activationMode" | "threadPolicies">,
+  threadId?: string | null,
+): SpotActivationMode => {
+  const policy =
+    threadId &&
+    config.threadPolicies &&
+    Object.prototype.hasOwnProperty.call(config.threadPolicies, threadId)
+      ? config.threadPolicies[threadId]
+      : undefined;
+  return policy?.activationMode ?? config.activationMode ?? "direct-or-mention";
+};
 
 export const getMergedSpotAccountConfig = (
   cfg: OpenClawConfig,
@@ -124,11 +142,13 @@ export const resolveSpotAccount = (
     enabled,
     baseUrl,
     activationMode,
+    threadPolicies,
     allowFrom,
     allowBotMessages,
     subscribeWorlds,
     subscribeThreads,
     monitorOrgChannels,
+    monitorAvatarActivity,
     ...rest
   } = config;
   return {
@@ -138,11 +158,13 @@ export const resolveSpotAccount = (
     baseUrl: normalizeSpotBaseUrl(baseUrl || DEFAULT_SPOT_BASE_URL),
     token,
     activationMode: activationMode ?? "direct-or-mention",
+    threadPolicies: threadPolicies ?? {},
     allowFrom: allowFrom ?? [],
     allowBotMessages: allowBotMessages === true,
     subscribeWorlds: subscribeWorlds ?? [],
     subscribeThreads: subscribeThreads ?? [],
     monitorOrgChannels: monitorOrgChannels === true,
+    monitorAvatarActivity: monitorAvatarActivity === true,
   };
 };
 
@@ -207,31 +229,32 @@ export const applySpotAccountConfig = ({
   return { ...cfg, channels } as OpenClawConfig;
 };
 
-export const spotSecretTargetRegistryEntries: readonly SecretTargetRegistryEntry[] = [
-  {
-    id: "channels.spot.accounts.*.token",
-    targetType: "channels.spot.accounts.*.token",
-    configFile: "openclaw.json",
-    pathPattern: "channels.spot.accounts.*.token",
-    secretShape: "secret_input",
-    expectedResolvedValue: "string",
-    includeInPlan: true,
-    includeInConfigure: true,
-    includeInAudit: true,
-    accountIdPathSegmentIndex: 3,
-  },
-  {
-    id: "channels.spot.token",
-    targetType: "channels.spot.token",
-    configFile: "openclaw.json",
-    pathPattern: "channels.spot.token",
-    secretShape: "secret_input",
-    expectedResolvedValue: "string",
-    includeInPlan: true,
-    includeInConfigure: true,
-    includeInAudit: true,
-  },
-];
+export const spotSecretTargetRegistryEntries: readonly SecretTargetRegistryEntry[] =
+  [
+    {
+      id: "channels.spot.accounts.*.token",
+      targetType: "channels.spot.accounts.*.token",
+      configFile: "openclaw.json",
+      pathPattern: "channels.spot.accounts.*.token",
+      secretShape: "secret_input",
+      expectedResolvedValue: "string",
+      includeInPlan: true,
+      includeInConfigure: true,
+      includeInAudit: true,
+      accountIdPathSegmentIndex: 3,
+    },
+    {
+      id: "channels.spot.token",
+      targetType: "channels.spot.token",
+      configFile: "openclaw.json",
+      pathPattern: "channels.spot.token",
+      secretShape: "secret_input",
+      expectedResolvedValue: "string",
+      includeInPlan: true,
+      includeInConfigure: true,
+      includeInAudit: true,
+    },
+  ];
 
 export const collectSpotRuntimeConfigAssignments = (
   params: Parameters<

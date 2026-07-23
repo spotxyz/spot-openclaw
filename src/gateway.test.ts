@@ -6,9 +6,11 @@ import {
   avatarLeaseRenewalIntervalMs,
   BoundedKeyedTaskQueue,
   DEFAULT_SPOT_AVATAR_TTL_SECONDS,
+  dispatchSpotAvatarActivity,
   dispatchSpotMessage,
   reconnectDelayMs,
   resolveAvatarLeaseTtlSeconds,
+  resolveSpotMessageActivationMode,
   resolveSpotSubscribedThreads,
   runManagedAvatarLease,
   selectGatewayHealthIssue,
@@ -38,11 +40,13 @@ const account = (
   baseUrl: "https://spot.test",
   token: "token",
   activationMode: "direct-or-mention",
+  threadPolicies: {},
   allowFrom: [],
   allowBotMessages: false,
   subscribeWorlds: [],
   subscribeThreads: [],
   monitorOrgChannels: false,
+  monitorAvatarActivity: false,
   ...patch,
 });
 
@@ -77,21 +81,22 @@ const event = (patch: Partial<SpotMessageEvent> = {}): SpotMessageEvent => ({
 
 const createControlledDelay = () => {
   const pending: Array<() => void> = [];
-  const delay = vi.fn((_milliseconds: number, signal: AbortSignal) =>
-    new Promise<void>((resolve) => {
-      if (signal.aborted) {
-        resolve();
-        return;
-      }
-      const finish = () => {
-        const index = pending.indexOf(finish);
-        if (index >= 0) pending.splice(index, 1);
-        signal.removeEventListener("abort", finish);
-        resolve();
-      };
-      signal.addEventListener("abort", finish, { once: true });
-      pending.push(finish);
-    }),
+  const delay = vi.fn(
+    (_milliseconds: number, signal: AbortSignal) =>
+      new Promise<void>((resolve) => {
+        if (signal.aborted) {
+          resolve();
+          return;
+        }
+        const finish = () => {
+          const index = pending.indexOf(finish);
+          if (index >= 0) pending.splice(index, 1);
+          signal.removeEventListener("abort", finish);
+          resolve();
+        };
+        signal.addEventListener("abort", finish, { once: true });
+        pending.push(finish);
+      }),
   );
   return {
     delay,
@@ -106,9 +111,9 @@ const createControlledDelay = () => {
 
 describe("Spot Agent Gateway policy", () => {
   it("fails closed, accepts exact ids, and requires an explicit wildcard to open", () => {
-    expect(shouldActivateSpotMessage(account(), event({ isDirectMessage: true }))).toBe(
-      false,
-    );
+    expect(
+      shouldActivateSpotMessage(account(), event({ isDirectMessage: true })),
+    ).toBe(false);
     expect(
       shouldActivateSpotMessage(
         account({ allowFrom: ["user-1"] }),
@@ -168,6 +173,47 @@ describe("Spot Agent Gateway policy", () => {
     ).toBe(true);
   });
 
+  it("overrides activation for an exact thread without bypassing sender policy", () => {
+    const configured = account({
+      activationMode: "direct-or-mention",
+      allowFrom: ["user-1"],
+      threadPolicies: {
+        "thread-1": { activationMode: "all" },
+        "quiet-thread": { activationMode: "mentions" },
+      },
+    });
+
+    expect(resolveSpotMessageActivationMode(configured, event())).toBe("all");
+    expect(shouldActivateSpotMessage(configured, event())).toBe(true);
+    expect(
+      shouldActivateSpotMessage(
+        configured,
+        event({ threadId: "other-thread" }),
+      ),
+    ).toBe(false);
+    expect(
+      shouldActivateSpotMessage(
+        configured,
+        event({ threadId: "thread-1", userId: "another-user" }),
+      ),
+    ).toBe(false);
+  });
+
+  it("allows a thread policy to narrow an account-wide all mode", () => {
+    const configured = account({
+      activationMode: "all",
+      allowFrom: ["user-1"],
+      threadPolicies: {
+        "thread-1": { activationMode: "mentions" },
+      },
+    });
+
+    expect(shouldActivateSpotMessage(configured, event())).toBe(false);
+    expect(
+      shouldActivateSpotMessage(configured, event({ isMentioned: true })),
+    ).toBe(true);
+  });
+
   it("serializes each thread, runs different threads concurrently, and bounds backlog", async () => {
     const errors: unknown[] = [];
     const order: string[] = [];
@@ -184,20 +230,26 @@ describe("Spot Agent Gateway policy", () => {
       capacity: 3,
       onError: (error) => errors.push(error),
     });
-    expect(queue.enqueue("thread-1", async () => {
-      order.push("first:start");
-      await first;
-      order.push("first:end");
-    })).toBe(true);
-    expect(queue.enqueue("thread-1", async () => {
-      order.push("second");
-      throw new Error("expected");
-    })).toBe(true);
-    expect(queue.enqueue("thread-2", async () => {
-      order.push("other:start");
-      await other;
-      order.push("other:end");
-    })).toBe(true);
+    expect(
+      queue.enqueue("thread-1", async () => {
+        order.push("first:start");
+        await first;
+        order.push("first:end");
+      }),
+    ).toBe(true);
+    expect(
+      queue.enqueue("thread-1", async () => {
+        order.push("second");
+        throw new Error("expected");
+      }),
+    ).toBe(true);
+    expect(
+      queue.enqueue("thread-2", async () => {
+        order.push("other:start");
+        await other;
+        order.push("other:end");
+      }),
+    ).toBe(true);
     expect(queue.enqueue("thread-3", async () => undefined)).toBe(false);
 
     await vi.waitFor(() =>
@@ -228,12 +280,12 @@ describe("Spot Agent Gateway policy", () => {
       payload: {},
     };
     expect(shouldAcceptSpotEventFrame(account(), frame)).toBe(true);
-    expect(
-      shouldAcceptSpotEventFrame(account({ orgId: "org-1" }), frame),
-    ).toBe(true);
-    expect(
-      shouldAcceptSpotEventFrame(account({ orgId: "org-2" }), frame),
-    ).toBe(false);
+    expect(shouldAcceptSpotEventFrame(account({ orgId: "org-1" }), frame)).toBe(
+      true,
+    );
+    expect(shouldAcceptSpotEventFrame(account({ orgId: "org-2" }), frame)).toBe(
+      false,
+    );
     expect(
       shouldAcceptSpotEventFrame(account({ orgId: "org-2" }), {
         ...frame,
@@ -341,6 +393,24 @@ describe("Spot Agent Gateway policy", () => {
       op: "subscribe",
       id: "openclaw-org-connection-1",
       threads: ["channel-2"],
+    });
+  });
+
+  it("opts subscribed worlds into avatar activity only when configured", async () => {
+    const ws = { send: vi.fn() };
+    await subscribeSpotGatewayTargets({
+      ws: ws as never,
+      client: { getOrgThreads: vi.fn() },
+      account: account({
+        worldId: "world-1",
+        monitorAvatarActivity: true,
+      }),
+      connectionId: "connection-activity",
+    });
+
+    expect(JSON.parse(ws.send.mock.calls[0]![0] as string)).toMatchObject({
+      worlds: ["world-1"],
+      include: ["avatar-activity"],
     });
   });
 
@@ -516,9 +586,7 @@ describe("Spot Agent Gateway policy", () => {
         op: "ack",
         id: "first",
         subscribed: { threads: [], worlds: [] },
-        rejected: [
-          { kind: "thread", id: "channel-1", code: "limit_exceeded" },
-        ],
+        rejected: [{ kind: "thread", id: "channel-1", code: "limit_exceeded" }],
       }),
     ).toContain("thread:channel-1 (limit_exceeded)");
     expect(
@@ -589,7 +657,9 @@ describe("Spot Agent Gateway policy", () => {
     });
 
     expect(sendThreadMessage).toHaveBeenCalledTimes(2);
-    const chunks = sendThreadMessage.mock.calls.map((call) => call[1] as string);
+    const chunks = sendThreadMessage.mock.calls.map(
+      (call) => call[1] as string,
+    );
     expect(chunks.every((chunk) => chunk.length <= 12_000)).toBe(true);
     expect(chunks.join("")).toBe(replyText);
     expect(runtime.routing.resolveAgentRoute).toHaveBeenCalledWith(
@@ -604,7 +674,9 @@ describe("Spot Agent Gateway policy", () => {
       }),
     );
     expect(buildContext).toHaveBeenCalledWith(
-      expect.objectContaining({ access: expect.objectContaining({ commands: { authorized: true } }) }),
+      expect.objectContaining({
+        access: expect.objectContaining({ commands: { authorized: true } }),
+      }),
     );
     expect(dispatchReply).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -624,6 +696,90 @@ describe("Spot Agent Gateway policy", () => {
       "thread-1",
       expect.any(String),
       { signal: abortController.signal },
+    );
+    expect(dispatchReply).toHaveBeenCalledOnce();
+  });
+
+  it("routes allowed avatar activity into the matching room as an ambient event", async () => {
+    const buildContext = vi.fn((value: unknown) => value);
+    const dispatchReply = vi.fn();
+    const runtime = {
+      routing: {
+        resolveAgentRoute: vi.fn().mockReturnValue({
+          agentId: "main",
+          sessionKey: "agent:main:spot:group:thread-lobby",
+        }),
+      },
+      inbound: { buildContext, dispatchReply },
+      session: {
+        resolveStorePath: vi.fn().mockReturnValue("/tmp/sessions.json"),
+        recordInboundSession: vi.fn(),
+      },
+      reply: { dispatchReplyWithBufferedBlockDispatcher: vi.fn() },
+    } as unknown as PluginRuntime["channel"];
+    const client = {
+      getSpots: vi.fn().mockResolvedValue([
+        {
+          id: "spot-lobby",
+          name: "Lobby",
+          slug: "lobby",
+          roomId: "room-lobby",
+          threadId: "thread-lobby",
+          isDefault: true,
+          isMeetingRoom: false,
+          canAccess: true,
+        },
+      ]),
+      getOrgMembers: vi.fn().mockResolvedValue([
+        {
+          userId: "user-1",
+          fullName: "Ada User",
+          displayName: "Ada",
+          isBot: false,
+          isGuest: false,
+        },
+      ]),
+    } as unknown as SpotClient;
+    const frame: SpotEventFrame = {
+      op: "event",
+      seq: 9,
+      type: "avatar.gesture.requested",
+      ts: "2026-07-23T12:00:00.000Z",
+      orgId: "org-1",
+      payload: {},
+    };
+
+    await expect(
+      dispatchSpotAvatarActivity({
+        cfg: {
+          messages: { groupChat: { unmentionedInbound: "room_event" } },
+        } as OpenClawConfig,
+        account: account({
+          orgId: "org-1",
+          monitorAvatarActivity: true,
+          allowFrom: ["user-1"],
+        }),
+        runtime,
+        client,
+        frame,
+        payload: {
+          worldId: "world-1",
+          userId: "user-1",
+          spotId: "spot-lobby",
+          gesture: "high-five",
+        },
+        selfUserId: "bot-1",
+      }),
+    ).resolves.toBe(true);
+
+    expect(buildContext).toHaveBeenCalledWith(
+      expect.objectContaining({
+        conversation: expect.objectContaining({ id: "thread-lobby" }),
+        message: expect.objectContaining({
+          bodyForAgent: expect.stringContaining("requester user id is user-1"),
+          inboundEventKind: "room_event",
+        }),
+      }),
     );
     expect(dispatchReply).toHaveBeenCalledOnce();
   });
@@ -663,7 +819,13 @@ describe("Spot Agent Gateway policy", () => {
       cfg: {
         messages: { groupChat: { unmentionedInbound: "room_event" } },
       } as OpenClawConfig,
-      account: account({ activationMode: "all", allowFrom: ["user-1"] }),
+      account: account({
+        activationMode: "direct-or-mention",
+        threadPolicies: {
+          "channel-1": { activationMode: "all" },
+        },
+        allowFrom: ["user-1"],
+      }),
       runtime,
       client,
       event: event({
@@ -681,11 +843,20 @@ describe("Spot Agent Gateway policy", () => {
     expect(client.getOrCreateEventThread).not.toHaveBeenCalled();
     expect(client.setThreadTyping).not.toHaveBeenCalled();
     expect(runtime.routing.resolveAgentRoute).toHaveBeenCalledOnce();
+    expect(buildContext).toHaveBeenCalledWith(
+      expect.objectContaining({
+        access: expect.objectContaining({
+          mentions: expect.objectContaining({ requireMention: false }),
+        }),
+      }),
+    );
   });
 
   it("pre-creates a child for an actionable channel message, types on the visible parent, and replies in the child", async () => {
     const buildContext = vi.fn((value: unknown) => value);
-    const sendThreadMessage = vi.fn().mockResolvedValue({ id: "reply-event-1" });
+    const sendThreadMessage = vi
+      .fn()
+      .mockResolvedValue({ id: "reply-event-1" });
     const setThreadTyping = vi.fn().mockResolvedValue(undefined);
     const dispatchReply = vi.fn(async (options: Record<string, any>) => {
       expect(options.ctxPayload.message.inboundEventKind).toBe("user_request");
@@ -720,7 +891,9 @@ describe("Spot Agent Gateway policy", () => {
       reply: { dispatchReplyWithBufferedBlockDispatcher: vi.fn() },
     } as unknown as PluginRuntime["channel"];
     const client = {
-      getOrCreateEventThread: vi.fn().mockResolvedValue({ id: "reply-thread-1" }),
+      getOrCreateEventThread: vi
+        .fn()
+        .mockResolvedValue({ id: "reply-thread-1" }),
       setThreadTyping,
       sendThreadMessage,
     } as unknown as SpotClient;
@@ -762,24 +935,22 @@ describe("Spot Agent Gateway policy", () => {
       expect(setThreadTyping).toHaveBeenCalledWith("channel-1", true);
     });
     expect(
-      setThreadTyping.mock.calls.every(([threadId]) => threadId === "channel-1"),
+      setThreadTyping.mock.calls.every(
+        ([threadId]) => threadId === "channel-1",
+      ),
     ).toBe(true);
-    expect(sendThreadMessage).toHaveBeenCalledWith(
-      "reply-thread-1",
-      "reply",
-      { signal: undefined },
-    );
+    expect(sendThreadMessage).toHaveBeenCalledWith("reply-thread-1", "reply", {
+      signal: undefined,
+    });
   });
 
   it("links a reply-thread followup to the ambient root channel session", async () => {
     const buildContext = vi.fn((value: unknown) => value);
     const dispatchReply = vi.fn();
-    const resolveAgentRoute = vi.fn(
-      ({ peer }: { peer: { id: string } }) => ({
-        agentId: "channel-agent",
-        sessionKey: `agent:channel-agent:spot:group:${peer.id}`,
-      }),
-    );
+    const resolveAgentRoute = vi.fn(({ peer }: { peer: { id: string } }) => ({
+      agentId: "channel-agent",
+      sessionKey: `agent:channel-agent:spot:group:${peer.id}`,
+    }));
     const runtime = {
       routing: { resolveAgentRoute },
       inbound: { buildContext, dispatchReply },
@@ -855,11 +1026,9 @@ describe("Spot Agent Gateway policy", () => {
           parentId: "channel-1",
         }),
         route: expect.objectContaining({
-          routeSessionKey:
-            "agent:channel-agent:spot:group:reply-thread-1",
+          routeSessionKey: "agent:channel-agent:spot:group:reply-thread-1",
           parentSessionKey: "agent:channel-agent:spot:group:channel-1",
-          modelParentSessionKey:
-            "agent:channel-agent:spot:group:channel-1",
+          modelParentSessionKey: "agent:channel-agent:spot:group:channel-1",
         }),
       }),
     );
@@ -933,9 +1102,13 @@ describe("managed Spot avatar lease", () => {
     expect(getAvatarState).toHaveBeenCalledWith("world-1", {
       signal: abortController.signal,
     });
-    expect(joinAvatar).toHaveBeenCalledWith("world-1", {
-      ttlSeconds: DEFAULT_SPOT_AVATAR_TTL_SECONDS,
-    }, { signal: abortController.signal });
+    expect(joinAvatar).toHaveBeenCalledWith(
+      "world-1",
+      {
+        ttlSeconds: DEFAULT_SPOT_AVATAR_TTL_SECONDS,
+      },
+      { signal: abortController.signal },
+    );
     expect(controlled.delay).toHaveBeenCalledWith(
       300_000,
       expect.any(AbortSignal),
@@ -962,9 +1135,14 @@ describe("managed Spot avatar lease", () => {
     });
 
     await vi.waitFor(() => expect(joinAvatar).toHaveBeenCalledTimes(2));
-    expect(joinAvatar).toHaveBeenNthCalledWith(2, "world-1", {
-      ttlSeconds: DEFAULT_SPOT_AVATAR_TTL_SECONDS,
-    }, { signal: reconnectAbortController.signal });
+    expect(joinAvatar).toHaveBeenNthCalledWith(
+      2,
+      "world-1",
+      {
+        ttlSeconds: DEFAULT_SPOT_AVATAR_TTL_SECONDS,
+      },
+      { signal: reconnectAbortController.signal },
+    );
     reconnectAbortController.abort();
     await reconnectedLease;
   });
@@ -991,12 +1169,16 @@ describe("managed Spot avatar lease", () => {
     });
 
     await vi.waitFor(() => expect(joinAvatar).toHaveBeenCalledOnce());
-    expect(joinAvatar).toHaveBeenCalledWith("world-1", {
-      spotId: "event-room",
-      position: { x: 1, z: 2 },
-      facing: 0.75,
-      ttlSeconds: 30,
-    }, { signal: abortController.signal });
+    expect(joinAvatar).toHaveBeenCalledWith(
+      "world-1",
+      {
+        spotId: "event-room",
+        position: { x: 1, z: 2 },
+        facing: 0.75,
+        ttlSeconds: 30,
+      },
+      { signal: abortController.signal },
+    );
     expect(controlled.delay).toHaveBeenCalledWith(
       15_000,
       expect.any(AbortSignal),
@@ -1086,16 +1268,26 @@ describe("managed Spot avatar lease", () => {
     });
 
     await vi.waitFor(() => expect(controlled.pendingCount()).toBe(1));
-    expect(joinAvatar).toHaveBeenNthCalledWith(1, "world-1", {
-      ttlSeconds: 60,
-    }, { signal: abortController.signal });
+    expect(joinAvatar).toHaveBeenNthCalledWith(
+      1,
+      "world-1",
+      {
+        ttlSeconds: 60,
+      },
+      { signal: abortController.signal },
+    );
     controlled.releaseNext();
     await vi.waitFor(() => expect(joinAvatar).toHaveBeenCalledTimes(2));
-    expect(joinAvatar).toHaveBeenNthCalledWith(2, "world-1", {
-      spotId: "event-room",
-      position: { x: 1, z: 2 },
-      ttlSeconds: 60,
-    }, { signal: abortController.signal });
+    expect(joinAvatar).toHaveBeenNthCalledWith(
+      2,
+      "world-1",
+      {
+        spotId: "event-room",
+        position: { x: 1, z: 2 },
+        ttlSeconds: 60,
+      },
+      { signal: abortController.signal },
+    );
 
     abortController.abort();
     await lease;
@@ -1126,10 +1318,14 @@ describe("managed Spot avatar lease", () => {
     );
     controlled.releaseNext();
     await vi.waitFor(() => expect(joinAvatar).toHaveBeenCalledOnce());
-    expect(joinAvatar).toHaveBeenCalledWith("world-1", {
-      spotId: "event-room",
-      ttlSeconds: DEFAULT_SPOT_AVATAR_TTL_SECONDS,
-    }, { signal: abortController.signal });
+    expect(joinAvatar).toHaveBeenCalledWith(
+      "world-1",
+      {
+        spotId: "event-room",
+        ttlSeconds: DEFAULT_SPOT_AVATAR_TTL_SECONDS,
+      },
+      { signal: abortController.signal },
+    );
 
     abortController.abort();
     await lease;

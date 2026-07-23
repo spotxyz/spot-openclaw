@@ -1,9 +1,14 @@
 import type {
+  SpotAvatarEmote,
+  SpotAvatarGesture,
   SpotAvatarStartupConfig,
   SpotAvatarState,
   SpotCreatedMessage,
   SpotEventReaction,
+  SpotLegacyHistoryPage,
   SpotMeResponse,
+  SpotMessageHistoryPage,
+  SpotOrgMember,
   SpotThreadSummary,
   SpotWorldSpot,
   SpotWorldAvatar,
@@ -38,6 +43,13 @@ export interface SpotRequestOptions {
 export interface SpotEventSummary {
   id: string;
   threadId: string;
+}
+
+export interface SpotHistoryPagination {
+  before?: string;
+  after?: string;
+  first?: number;
+  last?: number;
 }
 
 export const DEFAULT_SPOT_REQUEST_TIMEOUT_MS = 15_000;
@@ -116,10 +128,7 @@ export class SpotClient {
     if (!this.baseUrl) throw new Error("Spot baseUrl is required.");
     if (!this.token) throw new Error("Spot token is required.");
     if (!this.fetchImpl) throw new Error("A fetch implementation is required.");
-    if (
-      !Number.isFinite(this.requestTimeoutMs) ||
-      this.requestTimeoutMs <= 0
-    ) {
+    if (!Number.isFinite(this.requestTimeoutMs) || this.requestTimeoutMs <= 0) {
       throw new Error("Spot requestTimeoutMs must be a positive number.");
     }
   }
@@ -215,6 +224,19 @@ export class SpotClient {
     );
   }
 
+  async walkAvatarToSpot(
+    worldId: string,
+    input: { spotId: string; facing?: number },
+    options?: SpotRequestOptions,
+  ): Promise<SpotAvatarState> {
+    return this.request(
+      "POST",
+      `/api/world/${encodeURIComponent(worldId)}/avatar/walk-to-spot`,
+      input,
+      options,
+    );
+  }
+
   async teleportAvatar(
     worldId: string,
     input: { x: number; z: number; facing?: number },
@@ -243,12 +265,62 @@ export class SpotClient {
 
   async emote(
     worldId: string,
-    input: { emojiName?: string; animationName?: string },
+    input: { emojiName?: string; animation?: string },
     options?: SpotRequestOptions,
   ): Promise<SpotAvatarState> {
     return this.request(
       "POST",
       `/api/world/${encodeURIComponent(worldId)}/avatar/emote`,
+      input,
+      options,
+    );
+  }
+
+  async getAvatarEmotes(
+    worldId: string,
+    options?: SpotRequestOptions,
+  ): Promise<SpotAvatarEmote[]> {
+    return this.request(
+      "GET",
+      `/api/world/${encodeURIComponent(worldId)}/avatar/emotes`,
+      undefined,
+      options,
+    );
+  }
+
+  async getAvatarGestures(
+    worldId: string,
+    options?: SpotRequestOptions,
+  ): Promise<SpotAvatarGesture[]> {
+    return this.request(
+      "GET",
+      `/api/world/${encodeURIComponent(worldId)}/avatar/gestures`,
+      undefined,
+      options,
+    );
+  }
+
+  async requestAvatarGesture(
+    worldId: string,
+    gesture: string | null,
+    options?: SpotRequestOptions,
+  ): Promise<SpotAvatarState> {
+    return this.request(
+      "POST",
+      `/api/world/${encodeURIComponent(worldId)}/avatar/gesture`,
+      { gesture },
+      options,
+    );
+  }
+
+  async completeAvatarGesture(
+    worldId: string,
+    input: { requesterUserId: string; response?: string },
+    options?: SpotRequestOptions,
+  ): Promise<SpotAvatarState> {
+    return this.request(
+      "POST",
+      `/api/world/${encodeURIComponent(worldId)}/avatar/gesture/complete`,
       input,
       options,
     );
@@ -286,6 +358,50 @@ export class SpotClient {
     return this.request(
       "GET",
       `/api/org/${encodeURIComponent(orgId)}/threads`,
+      undefined,
+      options,
+    );
+  }
+
+  async getOrgMembers(
+    orgId: string,
+    options?: SpotRequestOptions,
+  ): Promise<SpotOrgMember[]> {
+    return this.request(
+      "GET",
+      `/api/org/${encodeURIComponent(orgId)}/members`,
+      undefined,
+      options,
+    );
+  }
+
+  async getThreadHistory(
+    threadId: string,
+    pagination: SpotHistoryPagination = {},
+    options?: SpotRequestOptions,
+  ): Promise<SpotMessageHistoryPage> {
+    return this.request(
+      "GET",
+      this.threadHistoryPath(
+        `/api/agent/v1/thread/${encodeURIComponent(threadId)}/events`,
+        pagination,
+      ),
+      undefined,
+      options,
+    );
+  }
+
+  async getLegacyThreadHistory(
+    threadId: string,
+    pagination: SpotHistoryPagination = {},
+    options?: SpotRequestOptions,
+  ): Promise<SpotLegacyHistoryPage> {
+    return this.request(
+      "GET",
+      this.threadHistoryPath(
+        `/api/thread/${encodeURIComponent(threadId)}/events`,
+        pagination,
+      ),
       undefined,
       options,
     );
@@ -372,7 +488,9 @@ export class SpotClient {
   ): Promise<void> {
     await this.request(
       "DELETE",
-      `/api/event/${encodeURIComponent(eventId)}/reactions/${encodeURIComponent(reactionId)}`,
+      `/api/event/${encodeURIComponent(eventId)}/reactions/${encodeURIComponent(
+        reactionId,
+      )}`,
       undefined,
       options,
     );
@@ -383,6 +501,21 @@ export class SpotClient {
     options?: SpotRequestOptions,
   ): Promise<{ id: string }> {
     return this.request("POST", "/api/dm", { userIds: [userId] }, options);
+  }
+
+  private threadHistoryPath(
+    path: string,
+    pagination: SpotHistoryPagination,
+  ): string {
+    const query = new URLSearchParams();
+    if (pagination.before) query.set("before", pagination.before);
+    if (pagination.after) query.set("after", pagination.after);
+    if (pagination.first !== undefined)
+      query.set("first", String(pagination.first));
+    if (pagination.last !== undefined)
+      query.set("last", String(pagination.last));
+    const suffix = query.toString();
+    return suffix ? `${path}?${suffix}` : path;
   }
 
   private async request<T>(

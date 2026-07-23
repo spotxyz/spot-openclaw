@@ -16,15 +16,49 @@ describe("SpotClient", () => {
       fetch,
     });
 
-    await expect(client.sendThreadMessage("thread/one", "hello")).resolves.toMatchObject({
+    await expect(
+      client.sendThreadMessage("thread/one", "hello"),
+    ).resolves.toMatchObject({
       id: "event-1",
     });
     expect(fetch).toHaveBeenCalledOnce();
     const [url, init] = fetch.mock.calls[0]!;
     expect(url).toBe("http://127.0.0.1:3000/api/thread/thread%2Fone/events");
-    expect(init?.headers).toMatchObject({ Authorization: "Bearer super-secret" });
+    expect(init?.headers).toMatchObject({
+      Authorization: "Bearer super-secret",
+    });
     expect(init?.body).toBe(JSON.stringify({ message: "hello" }));
     expect(init?.signal).toBeInstanceOf(AbortSignal);
+  });
+
+  it("reads normalized agent history with opaque cursor pagination", async () => {
+    const page = {
+      events: [],
+      pageInfo: {
+        startCursor: "start cursor",
+        endCursor: "end cursor",
+        hasPreviousPage: true,
+        hasNextPage: false,
+      },
+    };
+    const fetch = vi
+      .fn<typeof globalThis.fetch>()
+      .mockResolvedValue(new Response(JSON.stringify(page), { status: 200 }));
+    const client = new SpotClient({
+      baseUrl: "https://spot.test",
+      token: "x",
+      fetch,
+    });
+
+    await expect(
+      client.getThreadHistory("thread/one", {
+        before: "start cursor",
+        last: 20,
+      }),
+    ).resolves.toEqual(page);
+    expect(fetch.mock.calls[0]?.[0]).toBe(
+      "https://spot.test/api/agent/v1/thread/thread%2Fone/events?before=start+cursor&last=20",
+    );
   });
 
   it("combines caller cancellation with a finite request timeout", async () => {
@@ -70,7 +104,9 @@ describe("SpotClient", () => {
       requestTimeoutMs: 10,
     });
 
-    await expect(client.getMe()).rejects.toMatchObject({ name: "TimeoutError" });
+    await expect(client.getMe()).rejects.toMatchObject({
+      name: "TimeoutError",
+    });
   });
 
   it("normalizes room discovery and drops malformed entries", async () => {
@@ -92,13 +128,90 @@ describe("SpotClient", () => {
         { status: 200 },
       ),
     );
-    const client = new SpotClient({ baseUrl: "https://spot.test", token: "x", fetch });
+    const client = new SpotClient({
+      baseUrl: "https://spot.test",
+      token: "x",
+      fetch,
+    });
 
     await expect(client.getSpots("world one")).resolves.toEqual([
       expect.objectContaining({ id: "spot-1", threadId: "thread-1" }),
     ]);
     expect(fetch.mock.calls[0]?.[0]).toBe(
       "https://spot.test/api/world/world%20one/spots",
+    );
+  });
+
+  it("supports natural room walking and canonical avatar interactions", async () => {
+    const avatar = { joined: true, spotId: "spot-lobby" };
+    const fetch = vi
+      .fn<typeof globalThis.fetch>()
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify(avatar), { status: 200 }),
+      )
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify([
+            { id: "wave", animation: 19, defaultEmojiName: "wave" },
+          ]),
+          { status: 200 },
+        ),
+      )
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify([
+            { id: "high-five", gesture: 1, requiresResponse: false },
+          ]),
+          { status: 200 },
+        ),
+      )
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify(avatar), { status: 200 }),
+      )
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify(avatar), { status: 200 }),
+      )
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify(avatar), { status: 200 }),
+      );
+    const client = new SpotClient({
+      baseUrl: "https://spot.test",
+      token: "x",
+      fetch,
+    });
+
+    await client.walkAvatarToSpot("world-1", {
+      spotId: "spot-lobby",
+      facing: 1,
+    });
+    await expect(client.getAvatarEmotes("world-1")).resolves.toEqual([
+      expect.objectContaining({ id: "wave" }),
+    ]);
+    await expect(client.getAvatarGestures("world-1")).resolves.toEqual([
+      expect.objectContaining({ id: "high-five" }),
+    ]);
+    await client.emote("world-1", {
+      animation: "wave",
+      emojiName: "wave",
+    });
+    await client.requestAvatarGesture("world-1", "high-five");
+    await client.completeAvatarGesture("world-1", {
+      requesterUserId: "user-2",
+    });
+
+    expect(fetch.mock.calls.map(([url]) => url)).toEqual([
+      "https://spot.test/api/world/world-1/avatar/walk-to-spot",
+      "https://spot.test/api/world/world-1/avatar/emotes",
+      "https://spot.test/api/world/world-1/avatar/gestures",
+      "https://spot.test/api/world/world-1/avatar/emote",
+      "https://spot.test/api/world/world-1/avatar/gesture",
+      "https://spot.test/api/world/world-1/avatar/gesture/complete",
+    ]);
+    expect(fetch.mock.calls[3]?.[1]?.body).toBe(
+      JSON.stringify({ animation: "wave", emojiName: "wave" }),
+    );
+    expect(fetch.mock.calls[4]?.[1]?.body).toBe(
+      JSON.stringify({ gesture: "high-five" }),
     );
   });
 
@@ -127,12 +240,20 @@ describe("SpotClient", () => {
   });
 
   it("creates a DM through /api/dm", async () => {
-    const fetch = vi.fn<typeof globalThis.fetch>().mockResolvedValue(
-      new Response(JSON.stringify({ id: "dm-thread" }), { status: 201 }),
-    );
-    const client = new SpotClient({ baseUrl: "https://spot.test", token: "x", fetch });
+    const fetch = vi
+      .fn<typeof globalThis.fetch>()
+      .mockResolvedValue(
+        new Response(JSON.stringify({ id: "dm-thread" }), { status: 201 }),
+      );
+    const client = new SpotClient({
+      baseUrl: "https://spot.test",
+      token: "x",
+      fetch,
+    });
 
-    await expect(client.getOrCreateDm("user-2")).resolves.toEqual({ id: "dm-thread" });
+    await expect(client.getOrCreateDm("user-2")).resolves.toEqual({
+      id: "dm-thread",
+    });
     expect(fetch.mock.calls[0]?.[0]).toBe("https://spot.test/api/dm");
     expect(fetch.mock.calls[0]?.[1]?.body).toBe(
       JSON.stringify({ userIds: ["user-2"] }),
@@ -179,12 +300,20 @@ describe("SpotClient", () => {
           { status: 200 },
         ),
       )
-      .mockResolvedValueOnce(new Response(JSON.stringify({ id: "event-1" }), { status: 201 }))
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ id: "event-1" }), { status: 201 }),
+      )
       .mockResolvedValueOnce(new Response(null, { status: 204 }));
-    const client = new SpotClient({ baseUrl: "https://spot.test", token: "x", fetch });
+    const client = new SpotClient({
+      baseUrl: "https://spot.test",
+      token: "x",
+      fetch,
+    });
 
     await expect(client.getOrgThreads("org/1")).resolves.toHaveLength(1);
-    await expect(client.getOrCreateEventThread("event/1")).resolves.toMatchObject({
+    await expect(
+      client.getOrCreateEventThread("event/1"),
+    ).resolves.toMatchObject({
       id: "reply-1",
     });
     await client.setThreadTyping("reply/1", false);
@@ -202,8 +331,12 @@ describe("SpotClient", () => {
       "https://spot.test/api/event/event%2F1/reactions",
       "https://spot.test/api/event/event%2F1/reactions/reaction%2F1",
     ]);
-    expect(fetch.mock.calls[2]?.[1]?.body).toBe(JSON.stringify({ isEmpty: false }));
-    expect(fetch.mock.calls[4]?.[1]?.body).toBe(JSON.stringify({ emoji: "👍" }));
+    expect(fetch.mock.calls[2]?.[1]?.body).toBe(
+      JSON.stringify({ isEmpty: false }),
+    );
+    expect(fetch.mock.calls[4]?.[1]?.body).toBe(
+      JSON.stringify({ emoji: "👍" }),
+    );
     expect(fetch.mock.calls[5]?.[1]?.method).toBe("DELETE");
   });
 
@@ -216,12 +349,15 @@ describe("SpotClient", () => {
         }),
       )
       .mockResolvedValueOnce(
-        new Response(
-          JSON.stringify({ id: "channel-1", type: "Channel" }),
-          { status: 200 },
-        ),
+        new Response(JSON.stringify({ id: "channel-1", type: "Channel" }), {
+          status: 200,
+        }),
       );
-    const client = new SpotClient({ baseUrl: "https://spot.test", token: "x", fetch });
+    const client = new SpotClient({
+      baseUrl: "https://spot.test",
+      token: "x",
+      fetch,
+    });
 
     await expect(client.getEvent("event/1")).resolves.toMatchObject({
       threadId: "channel-1",
@@ -237,7 +373,10 @@ describe("SpotClient", () => {
 
   it("converts the REST base URL to the Agent Gateway WebSocket URL", () => {
     expect(
-      new SpotClient({ baseUrl: "https://spot.test/a?x=1", token: "x" }).gatewayUrl(),
+      new SpotClient({
+        baseUrl: "https://spot.test/a?x=1",
+        token: "x",
+      }).gatewayUrl(),
     ).toBe("wss://spot.test/api/agent/v1");
   });
 });

@@ -10,14 +10,22 @@ const account: ResolvedSpotAccount = {
   baseUrl: "https://spot.test",
   token: "token",
   activationMode: "direct-or-mention",
+  threadPolicies: {},
   allowFrom: ["user-1"],
   allowBotMessages: false,
   subscribeWorlds: [],
   subscribeThreads: [],
   monitorOrgChannels: false,
+  monitorAvatarActivity: false,
 };
 
 describe("Spot channel status", () => {
+  it("preserves advanced activation settings during account promotion", () => {
+    expect(spotChannelPlugin.setup?.singleAccountKeysToMove).toEqual(
+      expect.arrayContaining(["monitorAvatarActivity", "threadPolicies"]),
+    );
+  });
+
   it("advertises reply threads and shared reactions", () => {
     expect(spotChannelPlugin.capabilities).toMatchObject({
       reply: true,

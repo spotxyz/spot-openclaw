@@ -5,24 +5,24 @@
   "activation": {
     "onStartup": false
   },
-  "skills": [
-    "./skills"
-  ],
-  "channels": [
-    "spot"
-  ],
+  "skills": ["./skills"],
+  "channels": ["spot"],
   "contracts": {
     "tools": [
       "spot_observe",
       "spot_avatar_state",
       "spot_rooms",
+      "spot_emotes",
+      "spot_gestures",
+      "spot_history",
       "spot_join",
       "spot_leave",
       "spot_move",
       "spot_teleport",
       "spot_move_to_room",
       "spot_face",
-      "spot_emote"
+      "spot_emote",
+      "spot_gesture"
     ]
   },
   "configSchema": {
@@ -55,11 +55,7 @@
                     "pattern": "^[A-Z][A-Z0-9_]{0,127}$"
                   }
                 },
-                "required": [
-                  "source",
-                  "provider",
-                  "id"
-                ],
+                "required": ["source", "provider", "id"],
                 "additionalProperties": false
               },
               {
@@ -77,11 +73,7 @@
                     "minLength": 1
                   }
                 },
-                "required": [
-                  "source",
-                  "provider",
-                  "id"
-                ],
+                "required": ["source", "provider", "id"],
                 "additionalProperties": false
               },
               {
@@ -99,11 +91,7 @@
                     "minLength": 1
                   }
                 },
-                "required": [
-                  "source",
-                  "provider",
-                  "id"
-                ],
+                "required": ["source", "provider", "id"],
                 "additionalProperties": false
               }
             ]
@@ -139,10 +127,7 @@
                     "type": "number"
                   }
                 },
-                "required": [
-                  "x",
-                  "z"
-                ],
+                "required": ["x", "z"],
                 "additionalProperties": false
               },
               "facing": {
@@ -155,6 +140,24 @@
               }
             },
             "additionalProperties": false
+          },
+          "threadPolicies": {
+            "type": "object",
+            "propertyNames": {
+              "type": "string",
+              "minLength": 1
+            },
+            "additionalProperties": {
+              "type": "object",
+              "properties": {
+                "activationMode": {
+                  "type": "string",
+                  "enum": ["direct-or-mention", "mentions", "all"]
+                }
+              },
+              "required": ["activationMode"],
+              "additionalProperties": false
+            }
           },
           "account": {
             "type": "object",
@@ -198,18 +201,22 @@
                 "default": false,
                 "description": "Discover and subscribe to every viewable named channel in orgId. Spot currently accepts at most 100 explicit thread subscriptions per gateway connection."
               },
+              "monitorAvatarActivity": {
+                "type": "boolean",
+                "default": false,
+                "description": "Deliver allowed users' avatar presence, emote, and social-gesture activity to OpenClaw as ambient room events."
+              },
               "defaultTarget": {
                 "type": "string",
                 "description": "Default outbound target, normally thread:<threadId>."
               },
               "activationMode": {
                 "type": "string",
-                "enum": [
-                  "direct-or-mention",
-                  "mentions",
-                  "all"
-                ],
+                "enum": ["direct-or-mention", "mentions", "all"],
                 "default": "direct-or-mention"
+              },
+              "threadPolicies": {
+                "$ref": "#/definitions/threadPolicies"
               },
               "allowFrom": {
                 "type": "array",
@@ -271,18 +278,22 @@
             "default": false,
             "description": "Discover and subscribe to every viewable named channel in orgId. Spot currently accepts at most 100 explicit thread subscriptions per gateway connection."
           },
+          "monitorAvatarActivity": {
+            "type": "boolean",
+            "default": false,
+            "description": "Deliver allowed users' avatar presence, emote, and social-gesture activity to OpenClaw as ambient room events."
+          },
           "defaultTarget": {
             "type": "string",
             "description": "Default outbound target, normally thread:<threadId>."
           },
           "activationMode": {
             "type": "string",
-            "enum": [
-              "direct-or-mention",
-              "mentions",
-              "all"
-            ],
+            "enum": ["direct-or-mention", "mentions", "all"],
             "default": "direct-or-mention"
+          },
+          "threadPolicies": {
+            "$ref": "#/definitions/threadPolicies"
           },
           "allowFrom": {
             "type": "array",
@@ -335,6 +346,11 @@
           "label": "Monitor Organization Channels",
           "help": "Requires orgId, ThreadRead, and ThreadWrite. Discovers all viewable named channels and tracks access changes; Spot limits explicit subscriptions to 100 per connection."
         },
+        "monitorAvatarActivity": {
+          "label": "Monitor Avatar Activity",
+          "help": "Opt in to presence, emote, and gesture events from subscribed worlds. The normal allowed-user and bot-message filters still apply.",
+          "advanced": true
+        },
         "defaultTarget": {
           "label": "Default Chat Target",
           "placeholder": "thread:<threadId>"
@@ -342,6 +358,11 @@
         "activationMode": {
           "label": "Inbound Activation",
           "help": "Choose whether every allowed message, mentions, or DMs plus mentions activate OpenClaw."
+        },
+        "threadPolicies": {
+          "label": "Thread Activation Overrides",
+          "help": "Override activationMode for exact Spot room or named-channel thread ids. Policies do not subscribe the thread by themselves.",
+          "advanced": true
         },
         "allowFrom": {
           "label": "Allowed Spot Users",

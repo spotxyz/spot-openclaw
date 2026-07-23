@@ -17,6 +17,15 @@ import {
   subscribeManagedAvatarLeaseChange,
 } from "./avatar-lease-state.js";
 import { SpotClient } from "./client.js";
+import { resolveSpotThreadActivationMode } from "./config.js";
+import {
+  createSpotHistoryCursorStore,
+  type SpotHistoryCursorStore,
+} from "./history-cursor-state.js";
+import {
+  resolveSpotHistoryThreadIds,
+  SpotHistoryReconciler,
+} from "./history-reconciler.js";
 import { chunkSpotText } from "./outbound.js";
 import { formatMissingSpotScopes, SPOT_SCOPE } from "./scopes.js";
 import {
@@ -24,9 +33,11 @@ import {
   type ResolvedSpotAccount,
   type SpotAckFrame,
   type SpotAvatarStartupConfig,
+  type SpotAvatarActivityPayload,
   type SpotEventFrame,
   type SpotMessageEvent,
   type SpotMessagePayload,
+  type SpotOrgMember,
   type SpotServerFrame,
 } from "./types.js";
 
@@ -41,6 +52,7 @@ export interface GatewayDependencies {
     signal: AbortSignal,
   ) => Promise<void>;
   random?: () => number;
+  historyCursorStore?: SpotHistoryCursorStore;
 }
 
 export const DEFAULT_SPOT_AVATAR_TTL_SECONDS = 600;
@@ -56,11 +68,16 @@ export class SpotHelloEventBuffer {
 
   constructor(private readonly capacity = MAX_SPOT_INBOUND_BACKLOG) {
     if (!Number.isInteger(capacity) || capacity < 1) {
-      throw new Error("Spot hello event buffer capacity must be a positive integer.");
+      throw new Error(
+        "Spot hello event buffer capacity must be a positive integer.",
+      );
     }
   }
 
-  push(frame: SpotEventFrame, consume: (frame: SpotEventFrame) => void): boolean {
+  push(
+    frame: SpotEventFrame,
+    consume: (frame: SpotEventFrame) => void,
+  ): boolean {
     if (this.opened) {
       consume(frame);
       return true;
@@ -214,7 +231,10 @@ export const reconnectDelayMs = (
   return Math.round(base * (0.8 + random() * 0.4));
 };
 
-const defaultDelay = (milliseconds: number, signal: AbortSignal): Promise<void> =>
+const defaultDelay = (
+  milliseconds: number,
+  signal: AbortSignal,
+): Promise<void> =>
   new Promise((resolve) => {
     if (signal.aborted) {
       resolve();
@@ -315,10 +335,7 @@ export const runManagedAvatarLease = async (params: {
       if (signal.aborted) return;
       const phase = hasSucceeded ? "renewal" : "initialization";
       const issue = `Spot avatar lease ${phase} failed: ${String(error)}`;
-      nextDelayMs = Math.min(
-        renewalIntervalMs,
-        MAX_SPOT_AVATAR_RETRY_DELAY_MS,
-      );
+      nextDelayMs = Math.min(renewalIntervalMs, MAX_SPOT_AVATAR_RETRY_DELAY_MS);
       log?.warn(issue);
       onIssue?.(issue);
     } finally {
@@ -367,6 +384,29 @@ const isMessagePayload = (value: unknown): value is SpotMessagePayload => {
   );
 };
 
+const AVATAR_ACTIVITY_EVENT_TYPES = new Set([
+  "avatar.entered",
+  "avatar.left",
+  "avatar.room_changed",
+  "avatar.emoted",
+  "avatar.gesture.requested",
+  "avatar.gesture.cancelled",
+  "avatar.gesture.completed",
+]);
+
+const isAvatarActivityPayload = (
+  value: unknown,
+): value is SpotAvatarActivityPayload => {
+  if (!value || typeof value !== "object") return false;
+  const record = value as Record<string, unknown>;
+  return (
+    typeof record.worldId === "string" &&
+    typeof record.userId === "string" &&
+    (record.spotId === undefined || typeof record.spotId === "string") &&
+    (record.oldSpotId === undefined || typeof record.oldSpotId === "string")
+  );
+};
+
 const getChannelLifecycleThreadId = (value: unknown): string | undefined => {
   if (!value || typeof value !== "object") return undefined;
   const thread = (value as { thread?: unknown }).thread;
@@ -376,6 +416,12 @@ const getChannelLifecycleThreadId = (value: unknown): string | undefined => {
     ? record.id
     : undefined;
 };
+
+export const resolveSpotMessageActivationMode = (
+  account: ResolvedSpotAccount,
+  event: SpotMessageEvent,
+): ResolvedSpotAccount["activationMode"] =>
+  resolveSpotThreadActivationMode(account, event.threadId);
 
 export const shouldActivateSpotMessage = (
   account: ResolvedSpotAccount,
@@ -391,7 +437,7 @@ export const shouldActivateSpotMessage = (
     return false;
   }
   if (event.thread.type === "Event" && event.thread.parentEventId) return true;
-  switch (account.activationMode) {
+  switch (resolveSpotMessageActivationMode(account, event)) {
     case "all":
       return true;
     case "mentions":
@@ -424,11 +470,12 @@ export const resolveSpotSubscribedThreads = async (
 const sendSubscription = (
   ws: WebSocket,
   id: string,
-  targets: { worlds?: string[]; threads?: string[] },
+  targets: { worlds?: string[]; threads?: string[]; include?: string[] },
   op: "subscribe" | "unsubscribe" = "subscribe",
 ): void => {
   const worlds = unique(targets.worlds ?? []);
   const threads = unique(targets.threads ?? []);
+  const include = unique(targets.include ?? []);
   if (worlds.length === 0 && threads.length === 0) return;
   ws.send(
     JSON.stringify({
@@ -436,6 +483,7 @@ const sendSubscription = (
       id,
       ...(worlds.length > 0 ? { worlds } : {}),
       ...(threads.length > 0 ? { threads } : {}),
+      ...(include.length > 0 ? { include } : {}),
     }),
   );
 };
@@ -451,11 +499,11 @@ export const subscribeSpotGatewayTargets = async (params: {
   const requestedThreadIds =
     params.requestedThreadIds ?? new Set(params.account.subscribeThreads);
   sendSubscription(params.ws as WebSocket, `openclaw-${params.connectionId}`, {
-    worlds: unique([
-      params.account.worldId,
-      ...params.account.subscribeWorlds,
-    ]),
+    worlds: unique([params.account.worldId, ...params.account.subscribeWorlds]),
     threads: [...requestedThreadIds],
+    ...(params.account.monitorAvatarActivity
+      ? { include: ["avatar-activity"] }
+      : {}),
   });
   if (!params.account.monitorOrgChannels) return requestedThreadIds;
   const allThreads = await resolveSpotSubscribedThreads(
@@ -582,6 +630,7 @@ export const dispatchSpotMessage = async (params: {
   const isChannel = event.thread.type === "Channel";
   const isReplyThread =
     event.thread.type === "Event" && !!event.thread.parentEventId;
+  const activationMode = resolveSpotMessageActivationMode(account, event);
   const initialPeer = {
     kind: "group" as const,
     id: event.threadId,
@@ -592,7 +641,9 @@ export const dispatchSpotMessage = async (params: {
       signal: params.signal,
     });
     if (!parentEvent.threadId) {
-      throw new Error("Spot returned a reply-thread parent without a thread id.");
+      throw new Error(
+        "Spot returned a reply-thread parent without a thread id.",
+      );
     }
     replyParentPeer = { kind: "group", id: parentEvent.threadId };
   }
@@ -662,7 +713,8 @@ export const dispatchSpotMessage = async (params: {
   const senderName =
     event.user?.displayName || event.user?.fullName || event.userId;
   const conversationLabel =
-    event.thread.name || (isDirect ? senderName : `Spot ${event.thread.spotId ?? event.threadId}`);
+    event.thread.name ||
+    (isDirect ? senderName : `Spot ${event.thread.spotId ?? event.threadId}`);
   const target = `thread:${deliveryThreadId}`;
   const timestamp = Date.parse(event.timestamp);
   const context = runtime.inbound.buildContext({
@@ -719,8 +771,7 @@ export const dispatchSpotMessage = async (params: {
         canDetectMention: true,
         wasMentioned: event.isMentioned,
         explicitlyMentionedBot: event.isMentioned,
-        requireMention:
-          account.activationMode === "mentions" && !isReplyThread,
+        requireMention: activationMode === "mentions" && !isReplyThread,
         effectiveWasMentioned: event.isMentioned || isReplyThread,
         shouldSkip: false,
       },
@@ -778,9 +829,13 @@ export const dispatchSpotMessage = async (params: {
         if (!text) return { visibleReplySent: false };
         const messageIds: string[] = [];
         for (const chunk of chunkSpotText(text)) {
-          const created = await client.sendThreadMessage(deliveryThreadId, chunk, {
-            signal: params.signal,
-          });
+          const created = await client.sendThreadMessage(
+            deliveryThreadId,
+            chunk,
+            {
+              signal: params.signal,
+            },
+          );
           messageIds.push(created.id);
           params.onOutbound?.();
         }
@@ -817,6 +872,146 @@ export const dispatchSpotMessage = async (params: {
   });
 };
 
+const formatSpotAvatarActivity = (
+  type: string,
+  payload: SpotAvatarActivityPayload,
+  senderName: string,
+  roomName: string,
+): string => {
+  switch (type) {
+    case "avatar.entered":
+      return `${senderName} entered ${roomName}.`;
+    case "avatar.left":
+      return `${senderName} left ${roomName}.`;
+    case "avatar.room_changed":
+      return `${senderName} moved into ${roomName}.`;
+    case "avatar.emoted": {
+      const details = [
+        payload.animation ? `animation ${payload.animation}` : undefined,
+        payload.emojiName ? `emoji :${payload.emojiName}:` : undefined,
+      ].filter(Boolean);
+      return `${senderName} used an avatar emote${
+        details.length > 0 ? ` (${details.join(", ")})` : ""
+      } in ${roomName}.`;
+    }
+    case "avatar.gesture.requested":
+      return `${senderName} requested ${
+        payload.gesture ?? "a social gesture"
+      } in ${roomName}. The requester user id is ${payload.userId}.`;
+    case "avatar.gesture.cancelled":
+      return `${senderName} cancelled their social gesture in ${roomName}.`;
+    case "avatar.gesture.completed":
+      return `${senderName}'s ${
+        payload.gesture ?? "social gesture"
+      } was completed in ${roomName}.`;
+    default:
+      return `${senderName} had avatar activity in ${roomName}.`;
+  }
+};
+
+export const dispatchSpotAvatarActivity = async (params: {
+  cfg: SpotGatewayContext["cfg"];
+  account: ResolvedSpotAccount;
+  runtime: SpotChannelRuntime;
+  client: SpotClient;
+  frame: SpotEventFrame;
+  payload: SpotAvatarActivityPayload;
+  selfUserId?: string;
+  signal?: AbortSignal;
+  log?: ChannelLogSink;
+  onOutbound?: () => void;
+  resolveMember?: (
+    orgId: string,
+    userId: string,
+    signal?: AbortSignal,
+  ) => Promise<SpotOrgMember | undefined>;
+}): Promise<boolean> => {
+  const { account, client, frame, payload } = params;
+  if (
+    !account.monitorAvatarActivity ||
+    payload.userId === params.selfUserId ||
+    payload.completerUserId === params.selfUserId
+  ) {
+    return false;
+  }
+  if (
+    !account.allowFrom.includes("*") &&
+    !account.allowFrom.includes(payload.userId)
+  ) {
+    return false;
+  }
+
+  const rooms = await client.getSpots(payload.worldId, {
+    signal: params.signal,
+  });
+  const roomSpotId = payload.spotId ?? payload.oldSpotId;
+  const room = rooms.find((candidate) => candidate.id === roomSpotId);
+  if (!room) {
+    params.log?.warn(
+      `Spot avatar activity ${frame.type} referenced an unknown room.`,
+    );
+    return false;
+  }
+  const orgId = account.orgId ?? frame.orgId ?? undefined;
+  const member = orgId
+    ? params.resolveMember
+      ? await params.resolveMember(orgId, payload.userId, params.signal)
+      : (await client.getOrgMembers(orgId, { signal: params.signal })).find(
+          (candidate) => candidate.userId === payload.userId,
+        )
+    : undefined;
+  if (!account.allowBotMessages && member?.isBot) {
+    return false;
+  }
+  const senderName = member?.displayName || member?.fullName || payload.userId;
+  const text = formatSpotAvatarActivity(
+    frame.type,
+    payload,
+    senderName,
+    room.name,
+  );
+  const event: SpotMessageEvent = {
+    id: `avatar-activity:${payload.worldId}:${frame.seq}`,
+    threadId: room.threadId,
+    thread: {
+      id: room.threadId,
+      type: "Spot",
+      name: room.name,
+      orgId: orgId ?? null,
+      isPrivate: false,
+      spotId: room.id,
+      parentEventId: null,
+    },
+    userId: payload.userId,
+    user: member
+      ? {
+          id: member.userId,
+          fullName: member.fullName,
+          displayName: member.displayName,
+          isBot: member.isBot,
+        }
+      : null,
+    timestamp: frame.ts,
+    message: text,
+    text,
+    attachedFiles: [],
+    mentions: [],
+    isMentioned: false,
+    isDirectMessage: false,
+  };
+  await dispatchSpotMessage({
+    cfg: params.cfg,
+    account,
+    runtime: params.runtime,
+    client,
+    event,
+    ...(params.signal ? { signal: params.signal } : {}),
+    ...(params.log ? { log: params.log } : {}),
+    ...(params.onOutbound ? { onOutbound: params.onOutbound } : {}),
+  });
+  return true;
+};
+
 interface ConnectionResult {
   helloReceived: boolean;
   closeCode?: number;
@@ -830,6 +1025,7 @@ export interface GatewayHealthIssues {
   channelDiscoveryIssue?: string | undefined;
   gatewayIssue?: string | undefined;
   sequenceIssue?: string | undefined;
+  historyIssue?: string | undefined;
   avatarLeaseIssue?: string | undefined;
 }
 
@@ -841,6 +1037,7 @@ export const selectGatewayHealthIssue = (
   issues.channelDiscoveryIssue ??
   issues.gatewayIssue ??
   issues.sequenceIssue ??
+  issues.historyIssue ??
   issues.avatarLeaseIssue;
 
 const connectOnce = async (
@@ -849,10 +1046,13 @@ const connectOnce = async (
   deduper: BoundedEventDeduper,
   createWebSocket: NonNullable<GatewayDependencies["createWebSocket"]>,
   avatarLeaseDelay: NonNullable<GatewayDependencies["avatarLeaseDelay"]>,
+  historyCursorStore: SpotHistoryCursorStore,
 ): Promise<ConnectionResult> => {
   const runtime = ctx.channelRuntime as SpotChannelRuntime | undefined;
   if (!runtime) {
-    throw new Error("OpenClaw did not provide channelRuntime to the Spot plugin.");
+    throw new Error(
+      "OpenClaw did not provide channelRuntime to the Spot plugin.",
+    );
   }
   const ws = createWebSocket(client.gatewayUrl(), {
     headers: client.authorizationHeaders(),
@@ -867,6 +1067,7 @@ const connectOnce = async (
     channelDiscoveryIssue: string | undefined;
     gatewayIssue: string | undefined;
     sequenceIssue: string | undefined;
+    historyIssue: string | undefined;
     avatarLeaseIssue: string | undefined;
   } = {
     lastSeq: 0,
@@ -877,6 +1078,7 @@ const connectOnce = async (
     channelDiscoveryIssue: undefined,
     gatewayIssue: undefined,
     sequenceIssue: undefined,
+    historyIssue: undefined,
     avatarLeaseIssue: undefined,
   };
   const refreshGatewayHealth = (): void => {
@@ -905,7 +1107,150 @@ const connectOnce = async (
   const connectionController = new AbortController();
   const requestedThreadIds = new Set(ctx.account.subscribeThreads);
   const subscriptionRejections = new Map<string, string>();
+  const memberDirectories = new Map<
+    string,
+    { expiresAt: number; members: Promise<SpotOrgMember[]> }
+  >();
   let avatarLeaseTask: Promise<void> | undefined;
+  let historyReconciler: SpotHistoryReconciler | undefined;
+  let reconciliationTask: Promise<void> | undefined;
+
+  const resolveAvatarActivityMember = async (
+    orgId: string,
+    userId: string,
+    signal?: AbortSignal,
+  ): Promise<SpotOrgMember | undefined> => {
+    let directory = memberDirectories.get(orgId);
+    if (!directory || directory.expiresAt <= Date.now()) {
+      const members = client.getOrgMembers(orgId, { signal }).catch((error) => {
+        memberDirectories.delete(orgId);
+        throw error;
+      });
+      directory = { expiresAt: Date.now() + 60_000, members };
+      memberDirectories.set(orgId, directory);
+    }
+    return (await directory.members).find((member) => member.userId === userId);
+  };
+
+  const processSpotMessage = async (event: SpotMessageEvent): Promise<void> => {
+    if (deduper.hasOrAdd(event.id)) return;
+    if (!shouldActivateSpotMessage(ctx.account, event, state.selfUserId))
+      return;
+    updateStatus(ctx, { lastInboundAt: Date.now(), lastEventAt: Date.now() });
+    await dispatchSpotMessage({
+      cfg: ctx.cfg,
+      account: ctx.account,
+      runtime,
+      client,
+      event,
+      signal: connectionController.signal,
+      ...(ctx.log ? { log: ctx.log } : {}),
+      onOutbound: () => updateStatus(ctx, { lastOutboundAt: Date.now() }),
+    });
+  };
+
+  const enqueueSpotMessage = (
+    event: SpotMessageEvent,
+    advanceCursor: boolean,
+  ): Promise<void> =>
+    new Promise<void>((resolve, reject) => {
+      const accepted = queue.enqueue(event.threadId, async () => {
+        try {
+          await processSpotMessage(event);
+          if (advanceCursor && event.cursor) {
+            await historyCursorStore.set(event.threadId, event.cursor);
+          }
+          resolve();
+        } catch (error) {
+          reject(error);
+          throw error;
+        }
+      });
+      if (!accepted) {
+        const issue =
+          `Spot inbound backlog reached ${MAX_SPOT_INBOUND_BACKLOG}; ` +
+          `dropped message ${event.id} from thread ${event.threadId}.`;
+        ctx.log?.error(issue);
+        markGatewayIssue(issue);
+        reject(new Error(issue));
+      }
+    });
+
+  const enqueueSpotAvatarActivity = (
+    frame: SpotEventFrame,
+    payload: SpotAvatarActivityPayload,
+  ): Promise<void> =>
+    new Promise<void>((resolve, reject) => {
+      const key = `avatar:${payload.worldId}:${payload.spotId ?? payload.oldSpotId ?? "world"}`;
+      const accepted = queue.enqueue(key, async () => {
+        try {
+          const dispatched = await dispatchSpotAvatarActivity({
+            cfg: ctx.cfg,
+            account: ctx.account,
+            runtime,
+            client,
+            frame,
+            payload,
+            ...(state.selfUserId ? { selfUserId: state.selfUserId } : {}),
+            signal: connectionController.signal,
+            ...(ctx.log ? { log: ctx.log } : {}),
+            resolveMember: resolveAvatarActivityMember,
+            onOutbound: () => updateStatus(ctx, { lastOutboundAt: Date.now() }),
+          });
+          if (dispatched) {
+            updateStatus(ctx, {
+              lastInboundAt: Date.now(),
+              lastEventAt: Date.now(),
+            });
+          }
+          resolve();
+        } catch (error) {
+          reject(error);
+          throw error;
+        }
+      });
+      if (!accepted) {
+        const issue =
+          `Spot inbound backlog reached ${MAX_SPOT_INBOUND_BACKLOG}; ` +
+          `dropped avatar activity ${frame.type} from ${payload.userId}.`;
+        ctx.log?.error(issue);
+        markGatewayIssue(issue);
+        reject(new Error(issue));
+      }
+    });
+
+  const reconcileKnownThreads = (): Promise<void> => {
+    if (reconciliationTask) return reconciliationTask;
+    if (!historyReconciler) return Promise.resolve();
+    reconciliationTask = (async () => {
+      const threadIds = await resolveSpotHistoryThreadIds({
+        client,
+        account: ctx.account,
+        subscribedThreadIds: requestedThreadIds,
+        options: { signal: connectionController.signal },
+        ...(ctx.log ? { log: ctx.log } : {}),
+      });
+      const replayed = await historyReconciler!.reconcileThreads(threadIds);
+      if (replayed > 0) {
+        ctx.log?.info(`Spot replayed ${replayed} missed message(s).`);
+      }
+      state.sequenceIssue = undefined;
+      state.historyIssue = undefined;
+      refreshGatewayHealth();
+    })()
+      .catch((error) => {
+        if (connectionController.signal.aborted) return;
+        state.historyIssue = `Spot history reconciliation failed: ${String(
+          error,
+        )}`;
+        ctx.log?.warn(state.historyIssue);
+        refreshGatewayHealth();
+      })
+      .finally(() => {
+        reconciliationTask = undefined;
+      });
+    return reconciliationTask;
+  };
 
   const handleControlFrame = (
     frame: Exclude<SpotServerFrame, SpotEventFrame>,
@@ -913,13 +1258,19 @@ const connectOnce = async (
     if (frame.op === "hello") {
       state.helloReceived = true;
       state.selfUserId = frame.self.id;
+      historyReconciler = new SpotHistoryReconciler({
+        client,
+        selfUserId: frame.self.id,
+        cursorStore: historyCursorStore,
+        handleEvent: (event) => enqueueSpotMessage(event, false),
+        options: { signal: connectionController.signal },
+      });
       state.scopeIssue = formatMissingSpotScopes(ctx.account, frame.scopes);
       if (ctx.account.orgId && !frame.orgIds.includes(ctx.account.orgId)) {
         state.gatewayIssue =
           `Spot account is configured for organization ${ctx.account.orgId}, ` +
           "but the API token cannot access it.";
       }
-      helloEventBuffer.open(handleEventFrame);
       void subscribeSpotGatewayTargets({
         ws,
         client,
@@ -934,10 +1285,15 @@ const connectOnce = async (
         })
         .catch((error) => {
           if (connectionController.signal.aborted) return;
-          state.channelDiscoveryIssue =
-            `Spot organization channel discovery failed: ${String(error)}`;
+          state.channelDiscoveryIssue = `Spot organization channel discovery failed: ${String(
+            error,
+          )}`;
           ctx.log?.warn(state.channelDiscoveryIssue);
           refreshGatewayHealth();
+        })
+        .then(() => reconcileKnownThreads())
+        .finally(() => {
+          helloEventBuffer.open(handleEventFrame);
         });
       updateStatus(ctx, {
         lastConnectedAt: Date.now(),
@@ -962,7 +1318,9 @@ const connectOnce = async (
           },
         }).catch((error) => {
           if (connectionController.signal.aborted) return;
-          const issue = `Spot avatar lease stopped unexpectedly: ${String(error)}`;
+          const issue = `Spot avatar lease stopped unexpectedly: ${String(
+            error,
+          )}`;
           ctx.log?.warn(issue);
           state.avatarLeaseIssue = issue;
           refreshGatewayHealth();
@@ -990,12 +1348,15 @@ const connectOnce = async (
   };
 
   const handleEventFrame = (eventFrame: SpotEventFrame): void => {
+    let sequenceGap = false;
     if (state.lastSeq > 0 && eventFrame.seq !== state.lastSeq + 1) {
+      sequenceGap = true;
       state.sequenceIssue =
         `Spot Agent Gateway sequence gap: expected ${state.lastSeq + 1}, ` +
-        `received ${eventFrame.seq}; delivery is at-most-once and this gap was not reconciled.`;
+        `received ${eventFrame.seq}; reconciling known room and thread history.`;
       ctx.log?.warn(state.sequenceIssue);
       refreshGatewayHealth();
+      void reconcileKnownThreads();
     }
     state.lastSeq = eventFrame.seq;
     if (!shouldAcceptSpotEventFrame(ctx.account, eventFrame)) return;
@@ -1005,38 +1366,31 @@ const connectOnce = async (
       frame: eventFrame,
       requestedThreadIds,
     };
+    if (subscribeSpotChannelLifecycle(channelLifecycleParams)) {
+      void reconcileKnownThreads();
+      return;
+    }
+    if (unsubscribeSpotChannelLifecycle(channelLifecycleParams)) {
+      return;
+    }
+    if (AVATAR_ACTIVITY_EVENT_TYPES.has(eventFrame.type)) {
+      if (isAvatarActivityPayload(eventFrame.payload)) {
+        void enqueueSpotAvatarActivity(eventFrame, eventFrame.payload).catch(
+          () => {},
+        );
+      }
+      return;
+    }
     if (
-      subscribeSpotChannelLifecycle(channelLifecycleParams) ||
-      unsubscribeSpotChannelLifecycle(channelLifecycleParams)
+      eventFrame.type !== "message.created" ||
+      !isMessagePayload(eventFrame.payload)
     ) {
       return;
     }
-    if (eventFrame.type !== "message.created" || !isMessagePayload(eventFrame.payload)) {
-      return;
-    }
     const event = eventFrame.payload.event;
-    if (deduper.hasOrAdd(event.id)) return;
-    if (!shouldActivateSpotMessage(ctx.account, event, state.selfUserId)) return;
-    updateStatus(ctx, { lastInboundAt: Date.now(), lastEventAt: Date.now() });
-    const accepted = queue.enqueue(event.threadId, () =>
-      dispatchSpotMessage({
-        cfg: ctx.cfg,
-        account: ctx.account,
-        runtime,
-        client,
-        event,
-        signal: connectionController.signal,
-        ...(ctx.log ? { log: ctx.log } : {}),
-        onOutbound: () => updateStatus(ctx, { lastOutboundAt: Date.now() }),
-      }),
+    void enqueueSpotMessage(event, !sequenceGap && !state.sequenceIssue).catch(
+      () => {},
     );
-    if (!accepted) {
-      const issue =
-        `Spot inbound backlog reached ${MAX_SPOT_INBOUND_BACKLOG}; ` +
-        `dropped message ${event.id} from thread ${event.threadId}.`;
-      ctx.log?.error(issue);
-      markGatewayIssue(issue);
-    }
   };
 
   const result = await new Promise<ConnectionResult>((resolve) => {
@@ -1105,6 +1459,9 @@ export const startSpotGatewayAccount = async (
   const avatarLeaseDelay = dependencies.avatarLeaseDelay ?? defaultDelay;
   const random = dependencies.random ?? Math.random;
   const deduper = new BoundedEventDeduper();
+  const historyCursorStore =
+    dependencies.historyCursorStore ??
+    createSpotHistoryCursorStore(ctx.account.accountId);
   let attempt = 0;
   updateStatus(ctx, {
     running: true,
@@ -1122,6 +1479,7 @@ export const startSpotGatewayAccount = async (
         deduper,
         createWebSocket,
         avatarLeaseDelay,
+        historyCursorStore,
       );
     } catch (error) {
       result = { helloReceived: false, error: String(error) };
@@ -1140,7 +1498,9 @@ export const startSpotGatewayAccount = async (
     attempt = result.helloReceived ? 0 : attempt + 1;
     const waitMs = reconnectDelayMs(attempt, random);
     updateStatus(ctx, { reconnectAttempts: attempt });
-    ctx.log?.warn(`Spot Agent Gateway disconnected; reconnecting in ${waitMs}ms.`);
+    ctx.log?.warn(
+      `Spot Agent Gateway disconnected; reconnecting in ${waitMs}ms.`,
+    );
     await delay(waitMs, ctx.abortSignal);
   }
 

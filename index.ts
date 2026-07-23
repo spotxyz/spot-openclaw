@@ -7,11 +7,9 @@ import type {
 } from "openclaw/plugin-sdk";
 
 import { spotChannelPlugin, type SpotProbe } from "./src/channel.js";
+import { configureSpotHistoryCursorPersistence } from "./src/history-cursor-state.js";
 import { createSpotTools, SPOT_TOOL_NAMES } from "./src/tools.js";
-import {
-  SPOT_CHANNEL_ID,
-  type ResolvedSpotAccount,
-} from "./src/types.js";
+import { SPOT_CHANNEL_ID, type ResolvedSpotAccount } from "./src/types.js";
 
 export interface SpotOpenClawPluginEntry {
   id: string;
@@ -26,9 +24,14 @@ export interface SpotOpenClawPluginEntry {
 const entry: SpotOpenClawPluginEntry = defineChannelPluginEntry({
   id: SPOT_CHANNEL_ID,
   name: "Spot",
-  description: "Spot chat channel and managed virtual-office avatar for OpenClaw.",
+  description:
+    "Spot chat channel and managed virtual-office avatar for OpenClaw.",
   plugin: spotChannelPlugin,
   registerFull(api) {
+    configureSpotHistoryCursorPersistence(
+      (options) => api.runtime.state.openKeyedStore(options),
+      api.runtime.state.resolveStateDir(process.env)
+    );
     api.registerTool(
       (context) => {
         const contextualAccountId =
@@ -44,7 +47,7 @@ const entry: SpotOpenClawPluginEntry = defineChannelPluginEntry({
           ...(contextualAccountId ? { accountId: contextualAccountId } : {}),
         });
       },
-      { names: [...SPOT_TOOL_NAMES] },
+      { names: [...SPOT_TOOL_NAMES] }
     );
   },
 });

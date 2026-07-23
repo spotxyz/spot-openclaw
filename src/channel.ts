@@ -113,8 +113,10 @@ const sharedBase = createChannelPluginBase<ResolvedSpotAccount>({
         "subscribeWorlds",
         "subscribeThreads",
         "monitorOrgChannels",
+        "monitorAvatarActivity",
         "defaultTarget",
         "activationMode",
+        "threadPolicies",
         "allowFrom",
         "allowBotMessages",
         "avatar",
@@ -151,7 +153,8 @@ const sharedBase = createChannelPluginBase<ResolvedSpotAccount>({
     },
     groups: {
       resolveRequireMention: ({ cfg, accountId }) =>
-        getMergedSpotAccountConfig(cfg, accountId).config.activationMode !== "all",
+        getMergedSpotAccountConfig(cfg, accountId).config.activationMode !==
+        "all",
     },
     agentPrompt: {
       messageToolHints: () => [

@@ -20,6 +20,10 @@ export interface SpotAvatarStartupConfig {
   ttlSeconds?: number;
 }
 
+export interface SpotThreadPolicy {
+  activationMode: SpotActivationMode;
+}
+
 export interface SpotAccountConfig {
   enabled?: boolean;
   name?: string;
@@ -30,8 +34,10 @@ export interface SpotAccountConfig {
   subscribeWorlds?: string[];
   subscribeThreads?: string[];
   monitorOrgChannels?: boolean;
+  monitorAvatarActivity?: boolean;
   defaultTarget?: string;
   activationMode?: SpotActivationMode;
+  threadPolicies?: Record<string, SpotThreadPolicy>;
   allowFrom?: string[];
   allowBotMessages?: boolean;
   avatar?: SpotAvatarStartupConfig;
@@ -41,18 +47,22 @@ export interface SpotChannelConfig extends SpotAccountConfig {
   accounts?: Record<string, SpotAccountConfig>;
 }
 
-export interface ResolvedSpotAccount
-  extends Omit<SpotAccountConfig, "token" | "enabled"> {
+export interface ResolvedSpotAccount extends Omit<
+  SpotAccountConfig,
+  "token" | "enabled"
+> {
   accountId: string;
   enabled: boolean;
   baseUrl: string;
   token: string;
   activationMode: SpotActivationMode;
+  threadPolicies: Record<string, SpotThreadPolicy>;
   allowFrom: string[];
   allowBotMessages: boolean;
   subscribeWorlds: string[];
   subscribeThreads: string[];
   monitorOrgChannels: boolean;
+  monitorAvatarActivity: boolean;
 }
 
 export interface SpotUserSummary {
@@ -80,6 +90,8 @@ export interface SpotThreadSummary {
 
 export interface SpotMessageEvent {
   id: string;
+  /** Opaque REST cursor used to resume this thread after a delivery gap. */
+  cursor?: string;
   threadId: string;
   thread: SpotThreadSummary;
   userId: string;
@@ -130,16 +142,37 @@ export interface SpotErrorFrame {
 }
 
 export type SpotServerFrame =
-  | SpotHelloFrame
-  | SpotEventFrame
-  | SpotAckFrame
-  | SpotErrorFrame;
+  SpotHelloFrame | SpotEventFrame | SpotAckFrame | SpotErrorFrame;
 
 export interface SpotAvatarState {
   joined: boolean;
   spotId?: string;
   position?: { x: number; y: number; z: number };
   facing?: number;
+}
+
+export interface SpotAvatarEmote {
+  id: string;
+  animation: number;
+  defaultEmojiName: string;
+}
+
+export interface SpotAvatarGesture {
+  id: string;
+  gesture: number;
+  requiresResponse: boolean;
+}
+
+export interface SpotAvatarActivityPayload {
+  worldId: string;
+  userId: string;
+  spotId?: string;
+  oldSpotId?: string;
+  animation?: string;
+  emojiName?: string;
+  gesture?: string;
+  completerUserId?: string;
+  completerGesture?: string;
 }
 
 export interface SpotWorldAvatar {
@@ -171,4 +204,42 @@ export interface SpotEventReaction {
   id: string;
   userId: string;
   emoji: string;
+}
+
+export interface SpotHistoryPageInfo {
+  startCursor?: string | null;
+  endCursor?: string | null;
+  hasPreviousPage: boolean;
+  hasNextPage: boolean;
+}
+
+export interface SpotMessageHistoryPage {
+  events: SpotMessageEvent[];
+  pageInfo: SpotHistoryPageInfo;
+}
+
+export interface SpotOrgMember {
+  userId: string;
+  fullName: string;
+  displayName: string;
+  isBot: boolean;
+  isGuest: boolean;
+}
+
+export interface SpotLegacyHistoryPage {
+  edges: Array<{
+    cursor: string;
+    node: {
+      id: string;
+      type: string;
+      threadId: string;
+      userId: string;
+      timestamp: string;
+      payload?: {
+        message?: string | null;
+        attachedFiles?: Array<{ id?: string; name?: string }> | null;
+      };
+    };
+  }>;
+  pageInfo: SpotHistoryPageInfo;
 }
