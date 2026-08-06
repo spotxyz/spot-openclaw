@@ -5,6 +5,7 @@ import type {
 import { createTypingCallbacks } from "openclaw/plugin-sdk/channel-runtime";
 import {
   classifyChannelInboundEvent,
+  formatInboundMediaUnavailableText,
   resolveUnmentionedGroupInboundPolicy,
 } from "openclaw/plugin-sdk/channel-inbound";
 import type { PluginRuntime } from "openclaw/plugin-sdk/core";
@@ -16,6 +17,11 @@ import {
   isManagedAvatarLeaseSuppressed,
   subscribeManagedAvatarLeaseChange,
 } from "./avatar-lease-state.js";
+import {
+  formatUnavailableSpotAttachments,
+  hydrateSpotAttachedFiles,
+  materializeSpotAttachedFiles,
+} from "./attachments.js";
 import { SpotClient } from "./client.js";
 import { resolveSpotThreadActivationMode } from "./config.js";
 import {
@@ -626,6 +632,36 @@ export const dispatchSpotMessage = async (params: {
   onOutbound?: () => void;
 }): Promise<void> => {
   const { cfg, account, runtime, client, event, log } = params;
+  let attachedFiles = event.attachedFiles;
+  try {
+    attachedFiles = await hydrateSpotAttachedFiles(client, event, {
+      signal: params.signal,
+    });
+  } catch (error) {
+    log?.warn(
+      `Spot attachment metadata lookup failed for event ${event.id}: ${String(error)}`,
+    );
+  }
+  const materializedAttachments = await materializeSpotAttachedFiles(
+    runtime.media,
+    attachedFiles,
+    event.id,
+    { signal: params.signal },
+  );
+  for (const { error } of materializedAttachments.errors) {
+    log?.warn(
+      `Spot attachment download failed for event ${event.id}: ${String(error)}`,
+    );
+  }
+  const media = materializedAttachments.media;
+  const unavailableAttachmentNotice =
+    formatUnavailableSpotAttachments(materializedAttachments.unavailable);
+  const bodyForAgent = unavailableAttachmentNotice
+    ? formatInboundMediaUnavailableText({
+        body: event.text,
+        notice: unavailableAttachmentNotice,
+      })
+    : event.text;
   const isDirect = event.isDirectMessage;
   const isChannel = event.thread.type === "Channel";
   const isReplyThread =
@@ -758,11 +794,12 @@ export const dispatchSpotMessage = async (params: {
     },
     message: {
       rawBody: event.text,
-      bodyForAgent: event.text,
+      bodyForAgent,
       commandBody: event.text,
       senderLabel: senderName,
       inboundEventKind,
     },
+    ...(media.length > 0 ? { media } : {}),
     access: {
       commands: {
         authorized: true,

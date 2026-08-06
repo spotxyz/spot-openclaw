@@ -88,6 +88,22 @@ export interface SpotThreadSummary {
   parentEventId: string | null;
 }
 
+/**
+ * Attachment metadata from Spot. Older Agent Gateway versions only expose
+ * `name` (and advertised an `id` that the stored attachment does not have), so
+ * every field remains optional until the connector hydrates the full event.
+ */
+export interface SpotAttachedFile {
+  id?: string;
+  mimeType?: string;
+  name?: string;
+  size?: number;
+  url?: string;
+  thumbnailUrl?: string | null;
+  width?: number | null;
+  height?: number | null;
+}
+
 export interface SpotMessageEvent {
   id: string;
   /** Opaque REST cursor used to resume this thread after a delivery gap. */
@@ -99,7 +115,7 @@ export interface SpotMessageEvent {
   timestamp: string;
   message: string;
   text: string;
-  attachedFiles: { id?: string; name?: string }[];
+  attachedFiles: SpotAttachedFile[];
   mentions: Array<{ kind?: string; id?: string; [key: string]: unknown }>;
   isMentioned: boolean;
   isDirectMessage: boolean;
@@ -237,7 +253,7 @@ export interface SpotLegacyHistoryPage {
       timestamp: string;
       payload?: {
         message?: string | null;
-        attachedFiles?: Array<{ id?: string; name?: string }> | null;
+        attachedFiles?: SpotAttachedFile[] | null;
       };
     };
   }>;
