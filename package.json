@@ -1,6 +1,6 @@
 {
   "name": "@spotxyz/openclaw-spot",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "OpenClaw channel and avatar controls for Spot virtual offices.",
   "type": "module",
   "license": "UNLICENSED",
@@ -35,12 +35,12 @@
   "devDependencies": {
     "@types/node": "26.1.0",
     "@types/ws": "8.18.1",
-    "openclaw": "2026.7.1-2",
+    "openclaw": "2026.9.1",
     "typescript": "6.0.3",
     "vitest": "4.0.17"
   },
   "peerDependencies": {
-    "openclaw": ">=2026.7.1-2 <2026.8.0"
+    "openclaw": ">=2026.9.1 <2026.10.0"
   },
   "engines": {
     "node": ">=24.15.0"
@@ -61,12 +61,12 @@
       "blurb": "Let an OpenClaw agent participate in Spot as a bot avatar."
     },
     "compat": {
-      "pluginApi": ">=2026.7.1-2 <2026.8.0",
-      "minGatewayVersion": "2026.7.1-2"
+      "pluginApi": ">=2026.9.1 <2026.10.0",
+      "minGatewayVersion": "2026.9.1"
     },
     "build": {
-      "openclawVersion": "2026.7.1-2",
-      "pluginSdkVersion": "2026.7.1-2"
+      "openclawVersion": "2026.9.1",
+      "pluginSdkVersion": "2026.9.1"
     }
   }
 }

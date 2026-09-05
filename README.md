@@ -1,6 +1,6 @@
 # OpenClaw Spot
 
-An OpenClaw 2026.7 channel plugin that lets an agent receive and send Spot chat messages while managing a headless Spot avatar.
+An OpenClaw 2026.9 channel plugin that lets an agent receive and send Spot chat messages while managing a headless Spot avatar.
 
 This is an OpenClaw **channel plugin** (the most precise current term), with companion avatar tools and an OpenClaw skill. It connects to Spot's Agent Gateway over WebSocket for inbound events and uses the Spot REST API for chat and avatar actions.
 
@@ -21,7 +21,7 @@ This is an OpenClaw **channel plugin** (the most precise current term), with com
 
 ## Requirements
 
-- OpenClaw `2026.7.1-2` (the package is intentionally pinned while the plugin SDK evolves).
+- OpenClaw `>=2026.9.1 <2026.10.0` (tested against `2026.9.1`; older SDK releases are not supported by v0.2.0).
 - Node.js 24.15 or newer.
 - A Spot API token with the scopes needed by the configured features:
   - `EventRead` for Agent Gateway default streams and thread subscriptions.
@@ -35,6 +35,23 @@ This is an OpenClaw **channel plugin** (the most precise current term), with com
 - Spot server support for `GET /api/event/:eventId/reactions`; the connector uses it to list reactions and make add/remove operations idempotent across restarts.
 
 API token scopes and the bot user's effective Spot permissions are separate checks. Scopes authorize an API surface; they do not override organization, world, room, or role policy. Provision the bot user with the normal effective permissions needed for the rooms and actions it will use. In particular, `canViewChatHistory` is required for history reads and missed-event reconciliation.
+
+## Install v0.2.0
+
+Download `spotxyz-openclaw-spot-0.2.0.tgz` from the
+[GitHub release](https://github.com/spotxyz/spot-openclaw/releases/tag/v0.2.0), then run:
+
+```bash
+openclaw plugins install ./spotxyz-openclaw-spot-0.2.0.tgz --force
+openclaw plugins enable spot
+openclaw config validate
+openclaw gateway restart
+```
+
+The release archive includes compiled runtime files. Existing Spot account settings
+are preserved. For an existing linked checkout, check out `v0.2.0`, run `npm ci`
+(which builds the plugin), and restart the gateway. Keep the previous checkout or
+archive for rollback, paired with its supported OpenClaw version.
 
 ## Develop
 

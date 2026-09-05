@@ -79,12 +79,13 @@ describe("OpenClaw runtime integration", () => {
                 expect(context).toEqual(
                   expect.objectContaining({
                     BodyForAgent: "",
-                    MediaPath: savedAttachmentPath,
-                    MediaPaths: [savedAttachmentPath],
-                    MediaUrl: "https://spot.test/files/report.xlsx",
-                    MediaUrls: ["https://spot.test/files/report.xlsx"],
-                    MediaType:
-                      "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    media: [expect.objectContaining({
+                      path: savedAttachmentPath,
+                      url: "https://spot.test/files/report.xlsx",
+                      contentType:
+                        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                      kind: "document",
+                    })],
                   }),
                 );
                 await options?.onReplyStart?.();

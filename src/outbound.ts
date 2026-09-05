@@ -1,8 +1,9 @@
+import type {
+  ChannelOutboundAdapter,
+  ChannelOutboundContext,
+} from "openclaw/plugin-sdk/channel-contract";
 import type { OpenClawConfig } from "openclaw/plugin-sdk/channel-core";
-import {
-  recordChannelActivity,
-  type ChannelOutboundAdapter,
-} from "openclaw/plugin-sdk/channel-runtime";
+import { recordChannelActivity } from "openclaw/plugin-sdk/infra-runtime";
 import { createChannelMessageAdapterFromOutbound } from "openclaw/plugin-sdk/channel-outbound";
 import { chunkMarkdownText } from "openclaw/plugin-sdk/reply-runtime";
 
@@ -173,6 +174,42 @@ export const sendSpotText = async (params: {
   return { messageId: event.id, threadId };
 };
 
+// Both OpenClaw outbound interfaces share these inputs; their delivery callbacks
+// differ, so accept only the fields used by Spot's text transport.
+const sendSpotOutboundText = async (
+  ctx: Pick<
+    ChannelOutboundContext,
+    "cfg" | "accountId" | "to" | "text" | "replyToId"
+  >,
+) => {
+  const result = await sendSpotText({
+    cfg: ctx.cfg,
+    ...(ctx.accountId === undefined ? {} : { accountId: ctx.accountId }),
+    to: ctx.to,
+    text: ctx.text,
+    ...(ctx.replyToId === undefined ? {} : { replyToId: ctx.replyToId }),
+  });
+  recordChannelActivity({
+    channel: SPOT_CHANNEL_ID,
+    ...(ctx.accountId === undefined ? {} : { accountId: ctx.accountId }),
+    direction: "outbound",
+  });
+  return {
+    channel: SPOT_CHANNEL_ID,
+    messageId: result.messageId,
+    conversationId: result.threadId,
+  };
+};
+
+const spotDeliveryCapabilities = {
+  durableFinal: {
+    text: true,
+    replyTo: true,
+    thread: true,
+    messageSendingHooks: true,
+  },
+};
+
 export const spotOutboundAdapter: ChannelOutboundAdapter = {
   deliveryMode: "direct",
   textChunkLimit: SPOT_MESSAGE_MAX_LENGTH,
@@ -189,36 +226,14 @@ export const spotOutboundAdapter: ChannelOutboundAdapter = {
       };
     }
   },
-  deliveryCapabilities: {
-    durableFinal: {
-      text: true,
-      replyTo: true,
-      thread: true,
-      messageSendingHooks: true,
-    },
-  },
-  async sendText(ctx) {
-    const result = await sendSpotText({
-      cfg: ctx.cfg,
-      ...(ctx.accountId === undefined ? {} : { accountId: ctx.accountId }),
-      to: ctx.to,
-      text: ctx.text,
-      ...(ctx.replyToId === undefined ? {} : { replyToId: ctx.replyToId }),
-    });
-    recordChannelActivity({
-      channel: SPOT_CHANNEL_ID,
-      ...(ctx.accountId === undefined ? {} : { accountId: ctx.accountId }),
-      direction: "outbound",
-    });
-    return {
-      channel: SPOT_CHANNEL_ID,
-      messageId: result.messageId,
-      conversationId: result.threadId,
-    };
-  },
+  deliveryCapabilities: spotDeliveryCapabilities,
+  sendText: sendSpotOutboundText,
 };
 
 export const spotMessageAdapter = createChannelMessageAdapterFromOutbound({
   id: SPOT_CHANNEL_ID,
-  outbound: spotOutboundAdapter,
+  outbound: {
+    deliveryCapabilities: spotDeliveryCapabilities,
+    sendText: sendSpotOutboundText,
+  },
 });

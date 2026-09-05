@@ -1,8 +1,8 @@
 import type {
   ChannelGatewayContext,
   ChannelLogSink,
-} from "openclaw/plugin-sdk/channel-runtime";
-import { createTypingCallbacks } from "openclaw/plugin-sdk/channel-runtime";
+} from "openclaw/plugin-sdk/channel-contract";
+import { createTypingCallbacks } from "openclaw/plugin-sdk/channel-outbound";
 import {
   classifyChannelInboundEvent,
   formatInboundMediaUnavailableText,
@@ -810,7 +810,6 @@ export const dispatchSpotMessage = async (params: {
         explicitlyMentionedBot: event.isMentioned,
         requireMention: activationMode === "mentions" && !isReplyThread,
         effectiveWasMentioned: event.isMentioned || isReplyThread,
-        shouldSkip: false,
       },
     },
     extra: {

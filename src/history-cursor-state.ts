@@ -1,10 +1,11 @@
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 
-import type {
-  OpenKeyedStoreOptions,
-  PluginStateKeyedStore,
-} from "openclaw/plugin-sdk/plugin-state-runtime";
+import type { PluginRuntime } from "openclaw/plugin-sdk/core";
+
+type OpenKeyedStoreOptions = Parameters<PluginRuntime["state"]["openKeyedStore"]>[0];
+declare const openKeyedStore: PluginRuntime["state"]["openKeyedStore"];
+type PluginStateKeyedStore<T> = ReturnType<typeof openKeyedStore<T>>;
 
 interface SpotHistoryCursorRecord {
   cursor: string;

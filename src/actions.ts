@@ -2,7 +2,7 @@ import {
   jsonResult,
   resolveReactionMessageId,
 } from "openclaw/plugin-sdk/channel-actions";
-import type { ChannelMessageActionAdapter } from "openclaw/plugin-sdk/channel-runtime";
+import type { ChannelMessageActionAdapter } from "openclaw/plugin-sdk/channel-contract";
 import { Type } from "typebox";
 
 import { SpotClient } from "./client.js";

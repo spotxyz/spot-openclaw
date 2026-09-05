@@ -5,9 +5,9 @@ const { recordChannelActivity } = vi.hoisted(() => ({
   recordChannelActivity: vi.fn(),
 }));
 
-vi.mock("openclaw/plugin-sdk/channel-runtime", async (importOriginal) => ({
+vi.mock("openclaw/plugin-sdk/infra-runtime", async (importOriginal) => ({
   ...(await importOriginal<
-    typeof import("openclaw/plugin-sdk/channel-runtime")
+    typeof import("openclaw/plugin-sdk/infra-runtime")
   >()),
   recordChannelActivity,
 }));
@@ -19,6 +19,7 @@ import {
   resolveSpotReplyDestination,
   SPOT_MESSAGE_MAX_LENGTH,
   spotOutboundAdapter,
+  spotMessageAdapter,
 } from "./outbound.js";
 import {
   resolveSpotOutboundSessionRoute,
@@ -190,7 +191,10 @@ describe("Spot target grammar", () => {
     });
   });
 
-  it("records successful outbound activity for channel status", async () => {
+  it.each([
+    ["outbound", spotOutboundAdapter.sendText!],
+    ["message bridge", spotMessageAdapter.send!.text!],
+  ] as const)("records successful %s activity and preserves the destination", async (_name, send) => {
     vi.stubGlobal(
       "fetch",
       vi.fn(async () =>
@@ -209,13 +213,14 @@ describe("Spot target grammar", () => {
       },
     } as OpenClawConfig;
 
-    await spotOutboundAdapter.sendText!({
+    const result = await send({
       cfg,
       accountId: "default",
       to: "thread:thread-1",
       text: "hello",
     } as never);
 
+    expect(result).toMatchObject({ messageId: "event-1", conversationId: "thread-1" });
     expect(recordChannelActivity).toHaveBeenCalledWith({
       channel: "spot",
       accountId: "default",

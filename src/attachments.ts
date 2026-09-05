@@ -1,5 +1,5 @@
 import type { InboundMediaFacts } from "openclaw/plugin-sdk/channel-inbound";
-import { runTasksWithConcurrency } from "openclaw/plugin-sdk/concurrency-runtime";
+import { runTasksWithConcurrency } from "openclaw/plugin-sdk/infra-runtime";
 import type { PluginRuntime } from "openclaw/plugin-sdk/core";
 
 import type { SpotClient, SpotRequestOptions } from "./client.js";
