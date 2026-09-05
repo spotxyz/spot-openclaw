@@ -1,12 +1,13 @@
 # OpenClaw Spot
 
-An OpenClaw 2026.7 channel plugin that lets an agent receive and send Spot chat messages while managing a headless Spot avatar.
+An OpenClaw 2026.9 channel plugin that lets an agent receive and send Spot chat messages while managing a headless Spot avatar.
 
 This is an OpenClaw **channel plugin** (the most precise current term), with companion avatar tools and an OpenClaw skill. It connects to Spot's Agent Gateway over WebSocket for inbound events and uses the Spot REST API for chat and avatar actions.
 
 ## Capabilities
 
 - Per-conversation serialized, bounded inbound `message.created` handling with limited cross-conversation concurrency, deduplication, account-wide and per-thread activation policies, ambient channel observation, sender allowlisting, self filtering, bot-loop protection, and reconnect backoff.
+- Inbound Spot image, audio, video, and document attachments are downloaded through OpenClaw's guarded media store and passed through its shared media pipeline. The connector hydrates name-only payloads from older Spot servers through the authorized event endpoint.
 - Text replies and proactive text sends to `thread:<threadId>`; `user:<userId>` creates/resolves a DM thread first. Replies to named-channel messages create or reuse Spot reply threads, while room-chat and DM replies remain in their existing threads.
 - Opt-in discovery and continuous monitoring of every viewable named channel in an organization, plus explicit world/thread subscriptions.
 - Shared OpenClaw `react` and `reactions` message actions, with idempotent add and removal scoped to the agent's own reactions.
@@ -20,7 +21,7 @@ This is an OpenClaw **channel plugin** (the most precise current term), with com
 
 ## Requirements
 
-- OpenClaw `2026.7.1-2` (the package is intentionally pinned while the plugin SDK evolves).
+- OpenClaw `>=2026.9.1 <2026.10.0` (tested against `2026.9.1`; older SDK releases are not supported by v0.2.0).
 - Node.js 24.15 or newer.
 - A Spot API token with the scopes needed by the configured features:
   - `EventRead` for Agent Gateway default streams and thread subscriptions.
@@ -34,6 +35,23 @@ This is an OpenClaw **channel plugin** (the most precise current term), with com
 - Spot server support for `GET /api/event/:eventId/reactions`; the connector uses it to list reactions and make add/remove operations idempotent across restarts.
 
 API token scopes and the bot user's effective Spot permissions are separate checks. Scopes authorize an API surface; they do not override organization, world, room, or role policy. Provision the bot user with the normal effective permissions needed for the rooms and actions it will use. In particular, `canViewChatHistory` is required for history reads and missed-event reconciliation.
+
+## Install v0.2.0
+
+Download `spotxyz-openclaw-spot-0.2.0.tgz` from the
+[GitHub release](https://github.com/spotxyz/spot-openclaw/releases/tag/v0.2.0), then run:
+
+```bash
+openclaw plugins install ./spotxyz-openclaw-spot-0.2.0.tgz --force
+openclaw plugins enable spot
+openclaw config validate
+openclaw gateway restart
+```
+
+The release archive includes compiled runtime files. Existing Spot account settings
+are preserved. For an existing linked checkout, check out `v0.2.0`, run `npm ci`
+(which builds the plugin), and restart the gateway. Keep the previous checkout or
+archive for rollback, paired with its supported OpenClaw version.
 
 ## Develop
 
@@ -180,7 +198,7 @@ Top-level fields are inherited by named accounts, so a shared base URL can be co
 
 DMs and room chats establish `thread:<event.threadId>` as the durable reply target. An actionable top-level named-channel message first creates or reuses its Spot `Event` reply thread; that concrete child thread becomes the OpenClaw session and reply destination, while retaining the parent channel binding. Initial typing appears on the parent channel because Spot does not expose an empty reply thread until its first message; later typing and messages inside the established reply thread use the child. Followups reuse the same session without requiring another mention and never create nested threads. A passive `room_event` remains in the parent channel session and creates no empty child; an explicit message-tool reply resolves `replyToId` through the Spot event and thread APIs, then lazily creates the child. On the first child followup, OpenClaw's parent-session linkage forks the root channel transcript once so the thread retains the observed question and the agent's deliberate reply context.
 
-`user:`, `spot:`, and `world:` convenience targets are resolved to a concrete thread identity before outbound session routing. Gateway events received before the `hello` identity frame are buffered so self filtering is active before dispatch. Inbound chat events do not carry a world id; avatar tools use `channels.spot.worldId` (or an explicit tool argument). Sanitized avatar-activity payloads do carry their subscribed world id so they can be mapped to the correct room session.
+`user:`, `spot:`, and `world:` convenience targets are resolved to a concrete thread identity before outbound session routing. Gateway events received before the `hello` identity frame are buffered so self filtering is active before dispatch. Up to 10 inbound attachments per message, at 20 MiB each, are stored through OpenClaw's SSRF-guarded media path before the local path, source URL, and MIME type enter the agent context; during a rolling Spot upgrade, name-only attachments are hydrated with `GET /api/event/:eventId`. Inbound chat events do not carry a world id; avatar tools use `channels.spot.worldId` (or an explicit tool argument). Sanitized avatar-activity payloads do carry their subscribed world id so they can be mapped to the correct room session.
 
 Persist Spot ids and thread ids, not the discovery response's floorplan `roomId`. A Spot id is the logical room identity used by chat and avatar targeting; the floorplan room id represents current geometry and may change after topology edits.
 

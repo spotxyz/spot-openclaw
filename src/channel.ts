@@ -80,8 +80,6 @@ const sharedBase = createChannelPluginBase<ResolvedSpotAccount>({
       blurb: "Let an OpenClaw agent participate in Spot as a managed bot avatar.",
       aliases: ["spotxyz"],
       markdownCapable: true,
-      showInSetup: true,
-      showConfigured: true,
       selectionExtras: [
         "Inbound activation stays disabled until allowFrom contains exact Spot user ids or an explicit *.",
       ],

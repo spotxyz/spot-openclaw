@@ -1,5 +1,5 @@
-import type { OpenClawConfig } from "openclaw/plugin-sdk/channel-core";
-import type { ChannelSetupInput } from "openclaw/plugin-sdk/channel-runtime";
+import type { ChannelPlugin, OpenClawConfig } from "openclaw/plugin-sdk/channel-core";
+import type { ChannelSetupInput } from "openclaw/plugin-sdk/core";
 import {
   collectSimpleChannelFieldAssignments,
   getChannelSurface,
@@ -259,7 +259,7 @@ export const spotSecretTargetRegistryEntries: readonly SecretTargetRegistryEntry
 export const collectSpotRuntimeConfigAssignments = (
   params: Parameters<
     NonNullable<
-      import("openclaw/plugin-sdk/channel-runtime").ChannelSecretsAdapter["collectRuntimeConfigAssignments"]
+      NonNullable<ChannelPlugin<ResolvedSpotAccount>["secrets"]>["collectRuntimeConfigAssignments"]
     >
   >[0],
 ): void => {

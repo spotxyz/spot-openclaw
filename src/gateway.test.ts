@@ -622,6 +622,26 @@ describe("Spot Agent Gateway policy", () => {
       .fn()
       .mockResolvedValueOnce({ id: "reply-event-1" })
       .mockResolvedValueOnce({ id: "reply-event-2" });
+    const getEvent = vi.fn().mockResolvedValue({
+      id: "event-1",
+      threadId: "thread-1",
+      payload: {
+        attachedFiles: [
+          {
+            name: "image.png",
+            mimeType: "image/png",
+            size: 123,
+            url: "https://spot.test/files/image.png",
+          },
+        ],
+      },
+    });
+    const saveRemoteMedia = vi.fn().mockResolvedValue({
+      id: "image-id",
+      path: "/openclaw/media/image.png",
+      size: 123,
+      contentType: "image/png",
+    });
     const dispatchReply = vi.fn(async (options: Record<string, any>) => {
       expect(options.ctxPayload.reply.to).toBe("thread:thread-1");
       expect(options.ctxPayload.extra).not.toHaveProperty("WorldId");
@@ -638,13 +658,14 @@ describe("Spot Agent Gateway policy", () => {
         }),
       },
       inbound: { buildContext, dispatchReply },
+      media: { saveRemoteMedia },
       session: {
         resolveStorePath: vi.fn().mockReturnValue("/tmp/sessions.json"),
         recordInboundSession: vi.fn(),
       },
       reply: { dispatchReplyWithBufferedBlockDispatcher: vi.fn() },
     } as unknown as PluginRuntime["channel"];
-    const client = { sendThreadMessage } as unknown as SpotClient;
+    const client = { getEvent, sendThreadMessage } as unknown as SpotClient;
     const abortController = new AbortController();
 
     await dispatchSpotMessage({
@@ -652,7 +673,10 @@ describe("Spot Agent Gateway policy", () => {
       account: account(),
       runtime,
       client,
-      event: event({ isDirectMessage: true }),
+      event: event({
+        isDirectMessage: true,
+        attachedFiles: [{ name: "image.png" }],
+      }),
       signal: abortController.signal,
     });
 
@@ -676,8 +700,29 @@ describe("Spot Agent Gateway policy", () => {
     expect(buildContext).toHaveBeenCalledWith(
       expect.objectContaining({
         access: expect.objectContaining({ commands: { authorized: true } }),
+        media: [
+          {
+            path: "/openclaw/media/image.png",
+            url: "https://spot.test/files/image.png",
+            contentType: "image/png",
+            messageId: "event-1",
+          },
+        ],
       }),
     );
+    expect(getEvent).toHaveBeenCalledWith("event-1", {
+      signal: abortController.signal,
+    });
+    expect(saveRemoteMedia).toHaveBeenCalledWith({
+      url: "https://spot.test/files/image.png",
+      filePathHint: "image.png",
+      originalFilename: "image.png",
+      fallbackContentType: "image/png",
+      maxBytes: 20 * 1024 * 1024,
+      timeoutMs: 30_000,
+      readIdleTimeoutMs: 30_000,
+      requestInit: { signal: abortController.signal },
+    });
     expect(dispatchReply).toHaveBeenCalledWith(
       expect.objectContaining({
         dispatcherOptions: {

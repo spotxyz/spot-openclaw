@@ -1,10 +1,9 @@
 import { defineChannelPluginEntry } from "openclaw/plugin-sdk/channel-core";
 import type {
-  ChannelConfigSchema,
   ChannelPlugin,
   OpenClawPluginApi,
   PluginRuntime,
-} from "openclaw/plugin-sdk";
+} from "openclaw/plugin-sdk/channel-core";
 
 import { spotChannelPlugin, type SpotProbe } from "./src/channel.js";
 import { configureSpotHistoryCursorPersistence } from "./src/history-cursor-state.js";
@@ -15,7 +14,7 @@ export interface SpotOpenClawPluginEntry {
   id: string;
   name: string;
   description: string;
-  configSchema: ChannelConfigSchema;
+  configSchema: NonNullable<ChannelPlugin<ResolvedSpotAccount>["configSchema"]>;
   register: (api: OpenClawPluginApi) => void;
   channelPlugin: ChannelPlugin<ResolvedSpotAccount, SpotProbe>;
   setChannelRuntime?: (runtime: PluginRuntime) => void;

@@ -3,6 +3,7 @@ import type {
   SpotAvatarGesture,
   SpotAvatarStartupConfig,
   SpotAvatarState,
+  SpotAttachedFile,
   SpotCreatedMessage,
   SpotEventReaction,
   SpotLegacyHistoryPage,
@@ -43,6 +44,10 @@ export interface SpotRequestOptions {
 export interface SpotEventSummary {
   id: string;
   threadId: string;
+  payload?: {
+    attachedFiles?: SpotAttachedFile[] | null;
+    [key: string]: unknown;
+  };
 }
 
 export interface SpotHistoryPagination {

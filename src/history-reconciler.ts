@@ -1,4 +1,4 @@
-import type { ChannelLogSink } from "openclaw/plugin-sdk/channel-runtime";
+import type { ChannelLogSink } from "openclaw/plugin-sdk/channel-contract";
 
 import type { SpotClient, SpotRequestOptions } from "./client.js";
 import { loadSpotHistoryPage } from "./history.js";

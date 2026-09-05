@@ -12,7 +12,7 @@ import type { SpotClient } from "./client.js";
 import type { ResolvedSpotAccount, SpotMessageEvent } from "./types.js";
 
 describe("OpenClaw runtime integration", () => {
-  it("runs Spot channel replies and typing through the real dispatcher", async () => {
+  it("runs an attachment-only Spot turn through the real dispatcher", async () => {
     const stateDir = await mkdtemp(
       join(tmpdir(), "spot-openclaw-runtime-integration-"),
     );
@@ -44,6 +44,14 @@ describe("OpenClaw runtime integration", () => {
       const sendThreadMessage = vi
         .fn()
         .mockResolvedValue({ id: "reply-event-1" });
+      const savedAttachmentPath = join(stateDir, "media", "report.xlsx");
+      const saveRemoteMedia = vi.fn().mockResolvedValue({
+        id: "report-id",
+        path: savedAttachmentPath,
+        size: 123,
+        contentType:
+          "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      });
       const client = {
         getOrCreateEventThread,
         setThreadTyping,
@@ -67,12 +75,25 @@ describe("OpenClaw runtime integration", () => {
               ...params,
               // This replaces only the model call. The OpenClaw dispatcher,
               // option merging, typing lifecycle, and delivery are real.
-              replyResolver: async (_context, options) => {
+              replyResolver: async (context, options) => {
+                expect(context).toEqual(
+                  expect.objectContaining({
+                    BodyForAgent: "",
+                    media: [expect.objectContaining({
+                      path: savedAttachmentPath,
+                      url: "https://spot.test/files/report.xlsx",
+                      contentType:
+                        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                      kind: "document",
+                    })],
+                  }),
+                );
                 await options?.onReplyStart?.();
                 return { text: "runtime integration reply" };
               },
             }),
         },
+        media: { saveRemoteMedia },
         session: {
           resolveStorePath: () => join(stateDir, "sessions.json"),
           recordInboundSession: vi.fn(async () => undefined),
@@ -113,9 +134,17 @@ describe("OpenClaw runtime integration", () => {
           isBot: false,
         },
         timestamp: "2026-07-21T12:00:00.000Z",
-        message: "hello",
-        text: "hello",
-        attachedFiles: [],
+        message: "",
+        text: "",
+        attachedFiles: [
+          {
+            name: "report.xlsx",
+            mimeType:
+              "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            size: 123,
+            url: "https://spot.test/files/report.xlsx",
+          },
+        ],
         mentions: [],
         isMentioned: true,
         isDirectMessage: false,
@@ -131,6 +160,16 @@ describe("OpenClaw runtime integration", () => {
 
       expect(getOrCreateEventThread).toHaveBeenCalledWith("root-event-1", {
         signal: undefined,
+      });
+      expect(saveRemoteMedia).toHaveBeenCalledWith({
+        url: "https://spot.test/files/report.xlsx",
+        filePathHint: "report.xlsx",
+        originalFilename: "report.xlsx",
+        fallbackContentType:
+          "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        maxBytes: 20 * 1024 * 1024,
+        timeoutMs: 30_000,
+        readIdleTimeoutMs: 30_000,
       });
       expect(setThreadTyping.mock.calls).toEqual([
         ["channel-1", false, { signal: undefined }],
